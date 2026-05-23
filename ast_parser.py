@@ -1,0 +1,358 @@
+"""
+Layer 1 — AST Parser
+Extracts meaningful code units from:
+  Python      → functions, classes, methods (incl. nested)
+  JavaScript  → functions, classes, methods, arrow functions  [+ Express routes]
+  TypeScript  → same as JavaScript
+  C           → functions, structs
+  C++         → functions, classes, methods, structs
+  Java        → classes, methods, constructors
+  HTML        → inline <script> blocks (re-parsed as JS) + <style> blocks (re-parsed as CSS)
+  CSS/SCSS    → rules, @media blocks, @keyframes blocks
+ 
+Usage:
+    python ast_parser.py <repo_path>            # tree view of all supported files
+    python ast_parser.py <repo_path> --json     # JSON output (flat list)
+    python ast_parser.py <file.py>              # single file
+    python ast_parser.py <repo_path> --no-code  # metadata only, no source
+"""
+
+import sys
+import os
+import json
+import argparse
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+from pathlib import Path
+
+import tree_sitter_python as tspython
+import tree_sitter_javascript as tsjavascript
+import tree_sitter_html as tshtml
+import tree_sitter_css as tscss
+import tree_sitter_c as tsc
+import tree_sitter_cpp as tscpp
+import tree_sitter_java as tsjava
+
+from tree_sitter import Language, Parser, Node
+
+
+#Data Model
+
+#---------------------------------------------------------------------------------------------
+
+
+#dataclass is a Python decorator that automatically generates special methods for a class based on special fields
+
+@dataclass
+
+class CodeUnit:
+
+    """ This is a single standard unit for all languages. The kind values may include:
+        
+        Python/Js/C/C++/Java        -> function | method | c;ass | struct | constructor | arrow_function
+        Express (JS)                -> route
+        HTML                        -> script_block | style_block
+        CSS                         -> rule | media_rule | keyframes_rule
+    
+        
+    """
+
+
+    kind: str  
+    name: str
+    file: str
+    start_line: int
+    end_line: int
+    parent: Optional[str]       #enclosing class/ selector/ route prefix
+    
+    code: str                   # the actual sourcce code text corresponding to that extracted unit
+    language: str
+    children: list = field(default_factory=list)    #When creating a new object, call list() to generate the default value.
+
+    def display_name(self) -> str:
+        return f"{self.parent}.{self.name}" if self.parent else self.name
+
+
+#------------------------------------------------------------------------------------------------
+
+
+#Language Registry
+
+
+PY_LANGUAGE = Language(tspython.language())
+JS_LANGUAGE = Language(tsjavascript.language())
+HTML_LANGUAGE = Language(tshtml.language())
+CSS_LANGUAGE = Language(tscss.language())
+C_LANGUAGE = Language(tsc.language())
+CPP_LANGUAGE = Language(tscpp.language())
+JAVA_LANGUAGE = Language(tsjava.language())
+
+
+
+LANGUAGE_MAP: dict[str, tuple[str, Language]] = {
+    ".py":      ("python",          PY_LANGUAGE),
+    ".js":      ("javascript",      JS_LANGUAGE),
+    ".mjs":     ("javascript",      JS_LANGUAGE),
+    ".cjs":     ("javascript",      JS_LANGUAGE),
+    ".jsx":     ("javascript",      JS_LANGUAGE),
+    ".ts":      ("javascript",      JS_LANGUAGE),
+    ".tsx":     ("javascript",      JS_LANGUAGE),
+    ".html":    ("html",            HTML_LANGUAGE),
+    ".htm":     ("html",            HTML_LANGUAGE),
+    ".css":     ("css",             CSS_LANGUAGE),
+    ".scss":    ("css",             CSS_LANGUAGE),
+    ".c":       ("c",               C_LANGUAGE),
+    ".h":       ("c",               C_LANGUAGE),
+    ".cpp":     ("cpp",             CPP_LANGUAGE),
+    ".cc":      ("cpp",             CPP_LANGUAGE),
+    ".cxx":     ("cpp",             CPP_LANGUAGE),
+    ".hpp":     ("cpp",             CPP_LANGUAGE),
+    ".java":    ("java",            JAVA_LANGUAGE),
+    
+}
+
+
+#-----------------------------------------------------------------------------------------------------------------------------
+
+#Helper Functions
+
+
+#Function to extract the raw source text corresponding to an AST node
+
+def _text(node: Node, source: bytes) -> str:
+    return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+
+#Function to get the first name identifier
+
+def _first_id(node: Node, source: bytes, 
+              types=("identifier", "field_identifier",
+                     "property_identifier", "type_identifier")) -> Optional[str]:
+    for child in node.children:
+        if child.type in types:
+            return _text(child, source)
+        
+    return None
+
+# Create a CodeUnit from an AST node
+
+def _make(kind, name, node, source, file_path, language, parent=None) -> CodeUnit:
+    return CodeUnit(
+        kind= kind,
+        name = name or "<anonymous",
+        file=file_path,
+        start_line= node.start_point[0] +1, #because it's 0-index
+        end_line= node.end_point[0] + 1,
+        parent=parent,
+        code= _text(node, source),          #extract the raw source text/code
+        language= language,
+    )
+
+
+#-------------------------------------------------------------------------------------------------------------------------------
+#Extractor Functions
+#-------------------------------------------------------------------------------------------------------------------------------
+
+
+
+#Python
+
+def _extract_python(node: Node, source: bytes, file_path: str, parent_class: Optional[str] = None) -> list[CodeUnit]:
+    units=[]
+    for child in node.children:
+        if child.type == "class_definition":
+            name = _first_id(child, source)
+            u = _make("class", name, child, source, file_path, "python", parent_class)
+            u.children = _extract_python(child, source, file_path, name)
+            units.append(u)
+
+        elif child.type == "decorated_definition":
+            inner= next((c for c in child.children 
+                        if c.type in ("function_defintion")))
+            if inner:
+                name = _first_id(inner, source)
+                if inner.type == "class_definition":
+                    u = _make("class", name, child, source, file_path, "python", parent_class)
+                    u.children = _extract_python(inner, source, file_path, name)
+                else:
+                    kind = "method" if parent_class else "function"
+                    u = _make(kind, name, child, source, file_path, "python", parent_class)
+                    u.children = _extract_python(inner, source, file_path, name)
+                units.append(u)
+
+        elif child.type == "function_definition":
+            name = _first_id(child, source)
+            kind = "method" if parent_class else "function" #if its a class, treat is as a method, not function
+            u = _make(kind, name, child, source, file_path, "python", parent_class)
+            u.children = _extract_python(child, source, file_path, parent_class)
+            units.append(u)
+        else:
+            units.extend(_extract_python(child, source, file_path, parent_class))
+
+    return units
+
+#----------------------------------------------------------------------------------------------------------------------------------
+
+#JavaScript / TypeScript/ Express
+
+_EXPRESS_OBJECTS = {"app", "router", "Router"}
+_EXPRESS_VERBS = {"get", "post", "put", "patch", "delete", "use", "all"}
+
+"""AST roughly:
+
+call_expression
+├── member_expression (app.get)
+└── arguments """
+
+
+
+def _express_route(call_node: Node, source:bytes) -> Optional[tuple[str, str]]:
+    """Return (HTTP_VERB, '/path') if this looks like app.get('/path', ...) else None"""
+
+    member = next((c for c in call_node.children if c.type == "member_expression"), None)
+    if not member:
+        return None
+    
+    parts = _text(member, source).split(".")        # if app.get then parts = ["app", "get"]
+
+    if len(parts) == 2 and parts[0] in _EXPRESS_OBJECTS and parts[1] in _EXPRESS_VERBS:
+        args = next((c for c in call_node.children if c.type == "arguments"), None)
+        if args:
+            for child in args.children:
+                if child.type in ("string", "template_string"):
+                    path = _text(child, source).strip("'\"`")
+                    return parts[1].upper(), path
+        return None
+    
+def _extract_javascript(node: Node, source: bytes, file_path: str, 
+                        parent_class: Optional[str]= None) -> list[CodeUnit]:
+    units = []
+    for child in node.children:
+
+        #Express route detection
+        if child.type== "expression_statement":
+            call = next((c for c in child.children if c.type == "call_expression"), None)
+            if call:
+                route = _express_route(call, source)
+                if route:
+                    method, path = route
+                    u= _make("route", f"{method} {path}", child, source,
+                            file_path, "javascript")
+                    units.append(u)
+                    continue
+
+        if child.type in ("class_declaration", "class"):
+            name = _first_id(child, source)
+            u = _make("class", name, child, source, file_path, "javascript", parent_class)
+            u.children = _extract_javascript(child, source, file_path, name)
+            units.append(u)
+
+        elif child.type == "method_definition":
+            name = _first_id(child, source, 
+                             types = ("identifier", "property_identifier", 
+                                      "private_property_identifier"))
+            u = _make("method", name, child, source, file_path, "javascript", parent_class)
+            units.append(u)
+        
+        elif child.type in ("function_declaration", "generator function_declaration"):
+            name = _first_id(child, source)
+            kind = "method" if parent_class else "function"
+            u = _make(kind, name, child, source, file_path, "javascript", parent_class)
+            units.append(u)
+
+        elif child.type == "lexical_declaration":
+            for decl in child.children:
+                if decl.type == "varibale_declarator":
+                    var_name = _first_id(decl, source)
+                    val =  next(c for c in decl.children
+                                if c.type in ("arrow_function", "function_expression"))
+                    if val and var_name:
+                        kind = "method" if parent_class else "arrow_function"
+                        u= _make(kind, var_name, decl, source, file_path, 
+                                 "javascript", parent_class)
+                        u.children = _extract_javascript(val, source, file_path, parent_class)
+                        units.append(u)
+
+        else:
+            units. extend(_extract_javascript(child, source, file_path, parent_class))
+
+    return units
+
+#-----------------------------------------------------------------------------------------------------------------------------------
+
+# C
+
+# Because C tree sitter roughly
+# function_definition
+# ├── primitive_type (int)
+# ├── function_declarator
+# │   ├── identifier (add)
+# │   └── parameter_list
+# └── compound_statement
+
+def _c_func_name(node: Node, source: bytes) -> Optional[str]:
+    for child in node.children:
+        if child.type == "function_declarator":
+            return _first_id(child, source)
+    return None
+
+def _extract_c(node: Node, source:bytes, file_path:str, parent: Optional[str] = None) -> list[CodeUnit]:
+    units = []
+
+    for child in node.children:
+        if child.type == "function_definition":
+            name = _c_func_name(child, source)
+            units.append(_make("function", name, child, source, file_path, "c", parent))
+
+        elif child.type in ("struct_specifier", "union_specifier"):
+            name=_first_id(child, source, types=("type_identifier", "identifier"))
+            units.append(_make("struct", name, child, source, file_path, "c", parent))
+        else:
+            units.extend(_extract_c(child, source, file_path, parent))
+            return units
+    return units
+
+#-----------------------------------------------------------------------------------------------------------------------------------------
+
+#C++
+
+def _cpp_method_name(node: Node, source: bytes) -> Optional[str]:
+    for child in node.children:
+        if child.type == "function_declarator":
+            return _first_id(child, source, 
+                             types=("field_identifier", "identifier",
+                                    "destructor_name", "operator_name"))
+    return None
+
+def _extract_cpp(node: Node, source: bytes, file_path:str,
+                 parent_class: Optional[str] = None) -> list[CodeUnit]:
+    units=[]
+    for child in node.children:
+        if child.type=="class_specifier":
+            name = _first_id(child, source, types=("type_identifier", "identifier"))
+            u= _make("class", name, child, source, file_path, "cpp", parent_class)
+            u.children = _extract_cpp(child, source, file_path, name)
+            units.append(u)
+        
+        elif child.type in ("struct_specifier", "union_specifier"):
+            name = _first_id(child, source, types=("type_identifier", "identifier"))
+            u = _make("struct", name, child, source, file_path, "cpp", parent_class)
+            u.children = _extract_cpp(child, source, file_path, name)
+            units.append(u)
+        elif child.type == "function_definition":
+            name= _cpp_method_name(child, source)
+            kind= "method" if parent_class else "function"
+            units.append(_make(kind, name, child, source, file_path, "cpp", parent_class))
+        else:
+            units.extend(_extract_cpp(child, source, file_path, parent_class))
+        return units
+    
+#-------------------------------------------------------------------------------------------------------------------
+#Java
+
+def _extract_java(node: Node, source: bytes, file_path: str, 
+                  parent_class: Optional[str] = None) -> list[CodeUnit]:
+    units=[]
+    for child in node.children:
+        if child.type == "class_declaration":
+            name = _first_id
