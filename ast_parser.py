@@ -139,7 +139,7 @@ def _first_id(node: Node, source: bytes,
 def _make(kind, name, node, source, file_path, language, parent=None) -> CodeUnit:
     return CodeUnit(
         kind= kind,
-        name = name or "<anonymous",
+        name = name or "<anonymous>",
         file=file_path,
         start_line= node.start_point[0] +1, #because it's 0-index
         end_line= node.end_point[0] + 1,
@@ -168,7 +168,7 @@ def _extract_python(node: Node, source: bytes, file_path: str, parent_class: Opt
 
         elif child.type == "decorated_definition":
             inner= next((c for c in child.children 
-                        if c.type in ("function_defintion")))
+                        if c.type in ("function_definition", "class_definition")), None)  
             if inner:
                 name = _first_id(inner, source)
                 if inner.type == "class_definition":
@@ -254,7 +254,7 @@ def _extract_javascript(node: Node, source: bytes, file_path: str,
             u = _make("method", name, child, source, file_path, "javascript", parent_class)
             units.append(u)
         
-        elif child.type in ("function_declaration", "generator function_declaration"):
+        elif child.type in ("function_declaration", "generator_function_declaration"):  
             name = _first_id(child, source)
             kind = "method" if parent_class else "function"
             u = _make(kind, name, child, source, file_path, "javascript", parent_class)
@@ -262,10 +262,10 @@ def _extract_javascript(node: Node, source: bytes, file_path: str,
 
         elif child.type == "lexical_declaration":
             for decl in child.children:
-                if decl.type == "varibale_declarator":
+                if decl.type == "variable_declarator":  
                     var_name = _first_id(decl, source)
-                    val =  next(c for c in decl.children
-                                if c.type in ("arrow_function", "function_expression"))
+                    val =  next((c for c in decl.children
+                                if c.type in ("arrow_function", "function_expression")), None)
                     if val and var_name:
                         kind = "method" if parent_class else "arrow_function"
                         u= _make(kind, var_name, decl, source, file_path, 
@@ -309,9 +309,7 @@ def _extract_c(node: Node, source:bytes, file_path:str, parent: Optional[str] = 
             units.append(_make("struct", name, child, source, file_path, "c", parent))
         else:
             units.extend(_extract_c(child, source, file_path, parent))
-            return units
-    return units
-
+    return units  
 #-----------------------------------------------------------------------------------------------------------------------------------------
 
 #C++
@@ -345,7 +343,7 @@ def _extract_cpp(node: Node, source: bytes, file_path:str,
             units.append(_make(kind, name, child, source, file_path, "cpp", parent_class))
         else:
             units.extend(_extract_cpp(child, source, file_path, parent_class))
-        return units
+    return units  
     
 #-------------------------------------------------------------------------------------------------------------------
 #Java
@@ -361,7 +359,7 @@ def _extract_java(node: Node, source: bytes, file_path: str,
             units.append(u)
         elif child.type == "method_declaration":
             name = _first_id(child, source)
-            units.append(_make("method", name, child, source, file_path, name))
+            units.append(_make("method", name, child, source, file_path, "java", parent_class))  # fix 6: added "java" and parent_class
         elif child.type == "constructor_declaration":
             name = _first_id(child, source)
             units.append(_make("constructor", name, child, source, file_path, "java", parent_class))
@@ -423,11 +421,11 @@ def _extract_css (node: Node, source: bytes, file_path: str,
 
         elif child.type == "keyframes_statement":
             kname = next((c for c in child.children if c.type == "keyframes_name"), None)
-            name - f"@keyframes {_text(kname, source)}" if kname else "@keyframes"
+            name = f"@keyframes {_text(kname, source)}" if kname else "@keyframes"  # fix 7: - changed to =
             units.append(_make("keyframes_rule", name, child, source, file_path, "css", parent))
         else:
             units.extend(_extract_css(child, source, file_path, parent))
-        return units
+    return units  
     
 #------------------------------------------------------------------------------------------------------------------------------
 #HTML
@@ -447,25 +445,172 @@ def _extract_html(node: Node, source: bytes, file_path: str) -> list[CodeUnit]:
                 if inner:
                     block = _make("script_block", 
                                   f"<script> line {raw.start_point[0]+1}",
-                                  raw, source, file_path, "css")
+                                  raw, source, file_path, "javascript")  # fix 9: "css" -> "javascript"
                     block.children = inner
                     units.append(block)
 
-            elif child.type== "Style_element":
-                raw= next((c for c in child.children if c.type == "raw_text"), None)
-                if raw:
-                    css_src = source[raw.start_type: raw.end_byte]
-                    inner = _extract_css(_CSS_PARSER.parse(css_src).root_node,
-                                         css_src, file_path)
-                    if inner: 
-                        block = _make("style_block", 
-                                      f"<style> line {raw.start_point[0]+1}",
-                                      raw, source, file_path, "css")
-                        block.children = inner
-                        units.append(block)
-            
-            else:
-                units.extend(_extract_html(child, source, file_path))
-        return units
+        elif child.type == "style_element":  # fix 10: wrong indent + "Style_element" -> "style_element"
+            raw= next((c for c in child.children if c.type == "raw_text"), None)
+            if raw:
+                css_src = source[raw.start_byte: raw.end_byte]  # fix 11: start_type -> start_byte
+                inner = _extract_css(_CSS_PARSER.parse(css_src).root_node,
+                                     css_src, file_path)
+                if inner: 
+                    block = _make("style_block", 
+                                  f"<style> line {raw.start_point[0]+1}",
+                                  raw, source, file_path, "css")
+                    block.children = inner
+                    units.append(block)
+        
+        else:
+            units.extend(_extract_html(child, source, file_path))
+    return units 
     
-    
+#------------------------------------------------------------------------------------------------------------------
+#dispatch table
+
+_EXTRACTORS = {
+    "python":       _extract_python,
+    "javascript":   _extract_javascript,
+    "c":            _extract_c,
+    "cpp":          _extract_cpp,
+    "java":         _extract_java,
+    "css":          _extract_css,
+    "html":         lambda n, s, f: _extract_html(n,s,f),
+}
+
+#---------------------------------------------------------------------------------------------------------------------------
+#Public API
+
+def parse_file(file_path: str) -> list[CodeUnit]:
+    ext = Path(file_path).suffix.lower()
+    if ext not in LANGUAGE_MAP:
+        return []
+    lang_name, language = LANGUAGE_MAP[ext]
+    parser = Parser(language)
+    with open(file_path, "rb") as f:
+        source = f.read()
+    tree = parser.parse(source)
+    return _EXTRACTORS[lang_name](tree.root_node, source, file_path)
+
+_SKIP_DIRS = {
+    ".git", "__pycache__", "node_modules", ".venv", "venv",
+    "dist", "build", ".next", "target", "out", ".idea", ".vscode",
+}
+
+
+def parse_repo(repo_path:str, 
+               extensions: Optional[list[str]] = None) -> list[CodeUnit]:
+    supported = set(extensions or LANGUAGE_MAP.keys())
+    all_units: list[CodeUnit] = []
+    for dirpath, dirnames, filenames in os.walk(repo_path):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fname in sorted(filenames):
+            ext = Path(fname).suffix.lower()
+            if ext in supported:
+                full_path = os.path.join(dirpath, fname)
+                try:
+                    all_units.extend(parse_file(full_path))
+                except Exception as e:
+                    print(f" [warn] {full_path}: {e}", file = sys.stderr)
+    return all_units
+
+
+def _flatten(units: list[CodeUnit]) -> list[CodeUnit]:
+    result = []
+    for u in units:
+        result.append(u)
+        result.extend(_flatten(u.children))  
+    return result
+
+def units_to_records(units: list[CodeUnit]) -> list[dict]:
+    """Flat JSON - serialisable list - input format for Layer 2."""
+    rows = []
+    for u in _flatten(units):
+        d = asdict(u)
+        d.pop("children")
+        rows.append(d)
+    return rows
+
+
+
+#----------------------------------------------------------------------------------------------------------------------
+#Pretty Print
+
+_ICONS = {
+    "class": "🔷", "struct": "🔶", "function": "🟢", "method": "🔵",
+    "constructor": "🟣", "arrow_function": "🟩", "route": "🌐",
+    "rule": "🎨", "media_rule": "📐", "keyframes_rule": "✨",
+    "script_block": "📜", "style_block": "🖌️",
+}
+
+def _print_tree(units: list[CodeUnit], indent:int =0)-> None:
+    pad = "     " * indent
+    for u in units:
+        icon = _ICONS.get(u.kind, "❓")
+        loc = f"{Path(u.file)}:{u.start_line}-{u.end_line}"
+        print(f"{pad}{icon} {u.display_name()}  ({loc})")
+        if u.children:  
+            _print_tree(u.children, indent+1)
+
+def print_summary(units: list[CodeUnit], repo_path:str) -> None:
+    by_file = {}
+    for u in units:
+        by_file.setdefault(u.file, []).append(u)  
+
+    by_kind: dict[str, str] = {}
+    for u in _flatten(units):
+        by_kind[u.kind] = by_kind.get(u.kind, 0)+1
+    summary = ", ".join(f"{v} {k}(s)" for k,v in sorted(by_kind.items())) or "none"
+
+    print(f"\n{'='*62}")
+    print(f"  Layer 1 — AST Parse Results")
+    print(f"  Path  : {repo_path}")
+    print(f"  Files : {len(by_file)}")
+    print(f"  Units : {summary}")
+    print(f"{'='*62}\n")
+
+    for file_path, file_units in sorted(by_file.items()):
+        rel  = os.path.relpath(file_path, repo_path)
+        lang = LANGUAGE_MAP.get(Path(file_path).suffix.lower(), ("?",))[0]
+        print(f"📄 {rel}  [{lang}]")
+        _print_tree(file_units, indent=1)
+        print()
+
+#------------------------------------------------------------------------------------------------------------------------
+#CLI
+
+def main():
+    ap = argparse.ArgumentParser(
+        description = "Layer 1 - Multi-language AST code parser",
+        epilog = "Supported: .py  .js .ts .jsx .tsx  .html .css .scss  .c .h .cpp .hpp  .java"
+    )
+    ap.add_argument("path",      help="Repo directory or single source file")
+    ap.add_argument("--json",    action="store_true", help="Flat JSON array output")
+    ap.add_argument("--no-code", action="store_true", help="Strip source code from output")
+    args = ap.parse_args()
+
+    target = os.path.abspath(args.path)     #Convert the user-provided path into a full absolute path
+
+
+    if os.path.isfile(target):
+        units     = parse_file(target)
+        repo_root = os.path.dirname(target)
+    elif os.path.isdir(target):
+        units     = parse_repo(target)
+        repo_root = target
+    else:
+        print(f"Error: '{target}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.no_code:
+        for u in _flatten(units):
+            u.code = ""
+ 
+    if args.json:
+        print(json.dumps(units_to_records(units), indent=2))
+    else:
+        print_summary(units, repo_root)
+
+if __name__ == "__main__":
+    main()
