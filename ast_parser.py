@@ -355,4 +355,117 @@ def _extract_java(node: Node, source: bytes, file_path: str,
     units=[]
     for child in node.children:
         if child.type == "class_declaration":
-            name = _first_id
+            name = _first_id(child, source)
+            u = _make("class", name, child, source, file_path, "java", parent_class)
+            u.children = _extract_java(child, source, file_path, name)
+            units.append(u)
+        elif child.type == "method_declaration":
+            name = _first_id(child, source)
+            units.append(_make("method", name, child, source, file_path, name))
+        elif child.type == "constructor_declaration":
+            name = _first_id(child, source)
+            units.append(_make("constructor", name, child, source, file_path, "java", parent_class))
+        else :
+            units.extend(_extract_java(child, source, file_path, parent_class))
+    return units
+
+#-----------------------------------------------------------------------------------------------------------------------------------
+#CSS 
+# rule_set
+# ├── selectors
+# │   └── .container
+# └── block
+
+
+#for media statements, the AST looks like this
+# eg: @media screen and (max-width: 600px) {
+#     .container {
+#         display: none;
+#     }
+# }
+
+# media_statement
+# ├── @media
+# ├── screen
+# ├── and
+# ├── (max-width: 600px)
+# └── block (actual CSS rules)
+
+
+def _css_selector(node: Node, source: bytes) -> str:
+    sel = next((c for c in node.children if c.type == "selectors"), None)
+    return _text(sel, source).strip() if sel else "<unknown>"
+
+def _extract_css (node: Node, source: bytes, file_path: str,
+                  parent: Optional[str]= None) -> list[CodeUnit]:
+    units = []
+    for child in node.children:
+        if child.type == "rule_set":    #rule_set is the AST node type for a normal CSS rule
+            name = _css_selector(child, source)
+            units.append(_make("rule", name, child, source, file_path, "css", parent))
+
+        elif child.type == "media_statement":
+            #collect everything between @media and { as query string
+            parts=[]
+            for c in child.children:
+                if c.type == "block":
+                    break
+                if c.type != "@media":
+                    parts.append(_text(c,source).strip())
+            query = " ".join(p for p in parts if p)
+            name = f"@media {query}"
+            u= _make("media_rule", name, child, source, file_path, "css", parent)
+            block = next((c for c in child.children if c.type=="block"), None)
+
+            if block: 
+                u.children = _extract_css(block, source, file_path, name)
+            units.append(u)
+
+        elif child.type == "keyframes_statement":
+            kname = next((c for c in child.children if c.type == "keyframes_name"), None)
+            name - f"@keyframes {_text(kname, source)}" if kname else "@keyframes"
+            units.append(_make("keyframes_rule", name, child, source, file_path, "css", parent))
+        else:
+            units.extend(_extract_css(child, source, file_path, parent))
+        return units
+    
+#------------------------------------------------------------------------------------------------------------------------------
+#HTML
+
+_JS_PARSER = Parser(JS_LANGUAGE)
+_CSS_PARSER = Parser(CSS_LANGUAGE)
+
+def _extract_html(node: Node, source: bytes, file_path: str) -> list[CodeUnit]:
+    units=[]
+    for child in node.children: 
+        if child.type == "script_element":
+            raw = next((c for c in child.children if c.type == "raw_text"), None)
+            if raw:
+                js_src = source[raw.start_byte:raw.end_byte]
+                inner = _extract_javascript(_JS_PARSER.parse(js_src).root_node, 
+                                            js_src, file_path)      ## Parse extracted JS source into an AST and pass its root node to the JS extractor
+                if inner:
+                    block = _make("script_block", 
+                                  f"<script> line {raw.start_point[0]+1}",
+                                  raw, source, file_path, "css")
+                    block.children = inner
+                    units.append(block)
+
+            elif child.type== "Style_element":
+                raw= next((c for c in child.children if c.type == "raw_text"), None)
+                if raw:
+                    css_src = source[raw.start_type: raw.end_byte]
+                    inner = _extract_css(_CSS_PARSER.parse(css_src).root_node,
+                                         css_src, file_path)
+                    if inner: 
+                        block = _make("style_block", 
+                                      f"<style> line {raw.start_point[0]+1}",
+                                      raw, source, file_path, "css")
+                        block.children = inner
+                        units.append(block)
+            
+            else:
+                units.extend(_extract_html(child, source, file_path))
+        return units
+    
+    
