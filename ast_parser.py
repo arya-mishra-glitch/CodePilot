@@ -27,6 +27,7 @@ from pathlib import Path
 
 import tree_sitter_python as tspython
 import tree_sitter_javascript as tsjavascript
+import tree_sitter_typescript as tsts
 import tree_sitter_html as tshtml
 import tree_sitter_css as tscss
 import tree_sitter_c as tsc
@@ -49,7 +50,7 @@ class CodeUnit:
 
     """ This is a single standard unit for all languages. The kind values may include:
         
-        Python/Js/C/C++/Java        -> function | method | c;ass | struct | constructor | arrow_function
+        Python/Js/C/C++/Java        -> function | method | class | struct | constructor | arrow_function
         Express (JS)                -> route
         HTML                        -> script_block | style_block
         CSS                         -> rule | media_rule | keyframes_rule
@@ -81,6 +82,8 @@ class CodeUnit:
 
 PY_LANGUAGE = Language(tspython.language())
 JS_LANGUAGE = Language(tsjavascript.language())
+TS_LANGUAGE = Language(tsts.language_typescript())
+TSX_LANGUAGE = Language(tsts.language_tsx())
 HTML_LANGUAGE = Language(tshtml.language())
 CSS_LANGUAGE = Language(tscss.language())
 C_LANGUAGE = Language(tsc.language())
@@ -95,8 +98,8 @@ LANGUAGE_MAP: dict[str, tuple[str, Language]] = {
     ".mjs":     ("javascript",      JS_LANGUAGE),
     ".cjs":     ("javascript",      JS_LANGUAGE),
     ".jsx":     ("javascript",      JS_LANGUAGE),
-    ".ts":      ("javascript",      JS_LANGUAGE),
-    ".tsx":     ("javascript",      JS_LANGUAGE),
+    ".ts":      ("typescript",      TS_LANGUAGE),
+    ".tsx":     ("typescript",      TSX_LANGUAGE),
     ".html":    ("html",            HTML_LANGUAGE),
     ".htm":     ("html",            HTML_LANGUAGE),
     ".css":     ("css",             CSS_LANGUAGE),
@@ -184,7 +187,7 @@ def _extract_python(node: Node, source: bytes, file_path: str, parent_class: Opt
             name = _first_id(child, source)
             kind = "method" if parent_class else "function" #if its a class, treat is as a method, not function
             u = _make(kind, name, child, source, file_path, "python", parent_class)
-            u.children = _extract_python(child, source, file_path, parent_class)
+            u.children = _extract_python(child, source, file_path, name)
             units.append(u)
         else:
             units.extend(_extract_python(child, source, file_path, parent_class))
@@ -198,7 +201,26 @@ def _extract_python(node: Node, source: bytes, file_path: str, parent_class: Opt
 _EXPRESS_OBJECTS = {"app", "router", "Router"}
 _EXPRESS_VERBS = {"get", "post", "put", "patch", "delete", "use", "all"}
 
-"""AST roughly:
+
+def _member_expr_last_prop(node: Node, source: bytes) -> Optional[str]:
+    """Extract the rightmost property name from a member_expression.
+    
+    exports.login           -> 'login' (not 'exports')
+    module.exports.getUser  -> 'getUser' (not 'module)
+    plainIdentifier         -> 'plainIdentifier'
+    """
+    if node.type == "member_expression":
+        for child in reversed(node.children):
+            if child.type == "property_identifier":
+                return _text(child, source)
+            
+    #fallback: plain identifier (e.g. bare `someVar = asyn () => {}` )
+    return _first_id(node, source)
+
+
+
+
+"""AST for routes roughly:
 
 call_expression
 ├── member_expression (app.get)
@@ -241,6 +263,32 @@ def _extract_javascript(node: Node, source: bytes, file_path: str,
                     units.append(u)
                     continue
 
+            #handle module.exports = async function / assignment with function
+            assign = next((c for c in child.children if c.type == "assignment_expression"), None)
+            if assign: 
+                right = assign.children[-1] if assign.children else None        #last child is function 
+                if right and right.type in ("arrow_function", "function_expression"):
+                    left = assign.children[0] if assign.children else None
+                    name = _member_expr_last_prop(left, source) if left else None
+                    #eg: exports.login = async () => {} helpler extracts login which is correct
+                    #but module.exports = async function login() {} would extract exports, which is wrong. login should be the name. so,
+                                        # if left is `module.exports` (bare export), _member_expr_last_prop
+                    # returns "exports" — fall back to the function's own identifier instead
+                    if name == "exports":
+                        name = _first_id(right, source)
+                    if name:
+                        kind = "method" if parent_class else "arrow_function"
+                        # use child (expression_statement) so code includes "exports.X = ..."
+                        u= _make(kind, name, child, source, file_path, "javascript", parent_class)
+                        u.children = _extract_javascript(right, source, file_path, parent_class)
+                        units.append(u)
+                        continue
+
+                #fallback: recurse (e.g. module.exports = { ... }  object)
+                units.extend(_extract_javascript(assign, source, file_path, parent_class))
+                continue
+
+
         if child.type in ("class_declaration", "class"):
             name = _first_id(child, source)
             u = _make("class", name, child, source, file_path, "javascript", parent_class)
@@ -260,18 +308,79 @@ def _extract_javascript(node: Node, source: bytes, file_path: str,
             u = _make(kind, name, child, source, file_path, "javascript", parent_class)
             units.append(u)
 
-        elif child.type == "lexical_declaration":
+        elif child.type in ("lexical_declaration", "variable_declaration"):
+            found_callable = False
             for decl in child.children:
                 if decl.type == "variable_declarator":  
                     var_name = _first_id(decl, source)
                     val =  next((c for c in decl.children
                                 if c.type in ("arrow_function", "function_expression")), None)
+                    
                     if val and var_name:
                         kind = "method" if parent_class else "arrow_function"
                         u= _make(kind, var_name, decl, source, file_path, 
                                  "javascript", parent_class)
                         u.children = _extract_javascript(val, source, file_path, parent_class)
                         units.append(u)
+                        found_callable = True
+            #if no function in this declaration, still recurse (eg: deconstructed exports)
+
+            if not found_callable:
+                units.extend(_extract_javascript(child, source, file_path, parent_class))
+
+        #handle: export const fn = .../ export function fn / export default function 
+        elif child.type == "export_statement":
+            units.extend(_extract_javascript(child, source, file_path, parent_class))
+
+
+        # module.exports = {
+        #    login: async () => {}
+        # }
+        #AST stores it as
+        # object
+        # └── pair
+        #     └── arrow_function
+
+
+        #handle: object containing methods, e.g module exports = {getUser , ...}
+        elif child.type == "object":
+            units.extend(_extract_javascript(child, source, file_path, parent_class))
+
+         # handle: property in object: key: async function() {}
+        elif child.type == "pair":                                                                  
+            val = next((c for c in child.children
+                        if c.type in ("arrow_function", "function_expression",
+                                      "function")), None)
+            if val:
+                key = next((c for c in child.children
+                            if c.type in ("property_identifier", "identifier",                                                                      
+                                          "string")), None)
+                name = _text(key, source).strip("'\"") if key else None
+                if name:
+                    kind = "method" if parent_class else "arrow_function"
+                    u = _make(kind, name, val, source, file_path, "javascript", parent_class)
+                    u.children = _extract_javascript(val, source, file_path, parent_class)
+                    units.append(u)
+            else:
+                units.extend(_extract_javascript(child, source, file_path, parent_class))
+
+         # handle: shorthand_property_identifier in exports object: { myFunc }
+        elif child.type == "assignment_expression":
+            # e.g. module.exports = { ... } or exports.fn = async () => {}
+            right = child.children[-1] if child.children else None
+            if right and right.type in ("arrow_function", "function_expression"):
+                left = child.children[0] if child.children else None
+                name = _member_expr_last_prop(left, source) if left else None
+                if name == "exports":
+                    name = _first_id(right, source)
+                if name:
+                    kind = "method" if parent_class else "arrow_function"
+                    u = _make(kind, name, right, source, file_path, "javascript", parent_class)
+                    u.children = _extract_javascript(right, source, file_path, parent_class)
+                    units.append(u)
+            else:
+                units.extend(_extract_javascript(child, source, file_path, parent_class))
+
 
         else:
             units. extend(_extract_javascript(child, source, file_path, parent_class))
@@ -472,6 +581,7 @@ def _extract_html(node: Node, source: bytes, file_path: str) -> list[CodeUnit]:
 _EXTRACTORS = {
     "python":       _extract_python,
     "javascript":   _extract_javascript,
+    "typescript":   _extract_javascript,
     "c":            _extract_c,
     "cpp":          _extract_cpp,
     "java":         _extract_java,
@@ -558,9 +668,9 @@ def print_summary(units: list[CodeUnit], repo_path:str) -> None:
     for u in units:
         by_file.setdefault(u.file, []).append(u)  
 
-    by_kind: dict[str, str] = {}
+    by_kind: dict[str, int] = {}
     for u in _flatten(units):
-        by_kind[u.kind] = by_kind.get(u.kind, 0)+1
+         by_kind[u.kind] = by_kind.get(u.kind, 0) + 1
     summary = ", ".join(f"{v} {k}(s)" for k,v in sorted(by_kind.items())) or "none"
 
     print(f"\n{'='*62}")
