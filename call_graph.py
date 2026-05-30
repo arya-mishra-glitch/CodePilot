@@ -1,5 +1,5 @@
 """
-Layer 2 - Call Graph 
+Layer 2 - Call Graph Builder
 Reads the flat JSON produced by Layer 1 (units_to_record / --json output)
 and produces a call graph: for every symbol, which other symbols does it call?
 
@@ -60,7 +60,7 @@ def _callee_js(call_node: Node, source: bytes ) -> Optional[str]:
     JS/TS call_expression:
         call_expression
         ├── function:   identifier          ->  "foo"
-        └── function:   memeber_expression  ->  "obj.method"
+        └── function:   member_expression  ->  "obj.method"
     """
 
     fn = call_node.child_by_field_name("function")
@@ -87,11 +87,12 @@ def _callee_c_cpp(call_node: Node, source: bytes) -> Optional[str]:
         return None
     if fn.type == "identifier":
         return _text(fn, source)
-    if fn.type == "member_expression":
-        prop = fn.child_by_field_name("property")
-        if prop:
-            return _text(prop, source)
+    if fn.type in ("field_expression", "qualified_identifier"):
+        for child in reversed(fn.children):
+            if child.type in ("field_identifier", "identifier"):
+                return _text(child, source)
     return None
+
 
 
 def _callee_java(call_node: Node, source: bytes) -> Optional[str]:
@@ -118,7 +119,7 @@ _LANG_CFG: dict[str, tuple[Language, str, Callable]] = {
     "java":         (JAVA_LANGUAGE, "method_invocation",    _callee_java)
 }
 
-#Languages intentionally skip (no meaningful call semantics)
+#Languages we intentionally skip (no meaningful call semantics)
 _SKIP_LANGUAGES = {"html", "css"}
 
 
@@ -207,6 +208,8 @@ def build_call_graph(symbols: list[dict]) -> dict[str, list[str]]:
         display = sym["parent"] + "." + sym["name"] if sym.get("parent") else sym ["name"]
 
         #exclude self - reference (eg: recursive call with the same name)
+        # Compare against short name (not display) because callees are raw unresolved
+        # names — e.g. a recursive call to `login` appears as "login", not "AuthManager.login"
         callees = [c for c in callees if c != sym["name"]]
 
         graph[display] = callees
@@ -217,4 +220,119 @@ def build_call_graph(symbols: list[dict]) -> dict[str, list[str]]:
                 file = sys.stderr)
             
     return graph
+
+
+def resolve_callees(graph: dict[str, list[str]]) -> dict[str, list[str]]:
+    """
+    Optional second pass: try to resolve raw callee names to display_names
+    that actually exist in the graph.
+
+    e.g. graph = {
+        "AuthManager.login": [...],
+        "AuthManager.verify_token": [...],
+        "User.login": [...]
+    }
+
+    then display returns 
+
+    {
+        "login": [
+            "AuthManager.login",
+            "User.login"
+        ],
+        "verify_token": [
+            "AuthManager.verify_token"
+        ]
+    }
+
+    Falls back to the raw name if no match is found (external/stdlib call).
+
     
+    """
+
+    #Build lookup: short name -> list of display_name that and with ".name" or == name 
+    short_to_display: dict[str, list[str]] = {}
+
+    for display in graph:
+        short = display.split(".")[-1]
+        short_to_display.setdefault(short, []).append(display)
+
+    resolved: dict[str, list[str]] = {}
+    for caller, callees in graph.items():
+        resolved_callees = []
+        for raw in callees:
+            candidates = short_to_display.get(raw, [])
+            if len(candidates) == 1:
+                resolved_callees.append(candidates[0])      #unambiguous
+            elif len(candidates) > 1:
+                #Ambiguous - prefer same file / same class prefix if possible
+                caller_prefix = caller.split(".")[0] if "." in caller else ""
+                match = next (
+                    (d for d in candidates if d.startswith(caller_prefix + ".")),
+                    candidates[0],      #fallback: first match
+                )
+                resolved_callees.append(match)
+            else:
+                resolved_callees.append(raw)        # external/ stdlib
+        resolved[caller] = resolved_callees
+
+    return resolved
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    ap = argparse.ArgumentParser(
+        description = "Layer 2 - Build a call graph from Layer 1 JSON output"
+    )
+    ap.add_argument("symbols_json",
+                    help="Path to the JSON file produced by: python ast_parser.py <repo> --json")
+    ap.add_argument("--save", action="store_true",
+                    help="Save call_graph.json and symbols.json to --out directory")
+    ap.add_argument("--out",    default="repo_index",
+                    help="Output directory (default: ./repo_index)")
+    ap.add_argument("--resolve", action="store_true",
+                    help="Run the optional callee-resolution pass")
+    args = ap.parse_args()
+
+    #Load symbols
+
+    with open(args.symbols_json, "r", encoding="utf-8") as f:
+        symbols: list[dict] = json.load(f)
+    print(f"    Loaded {len(symbols)} symbols from {args.symbols_json}", file=sys.stderr)
+
+    #build graph
+    graph = build_call_graph(symbols)
+    print(f"    Built call graph: {len(graph)} callable nodes", file=sys.stderr)
+
+    if args.resolve:
+        graph = resolve_callees(graph)
+        print(" Callee resolution pass complete.", file=sys.stderr )
+
+    #stats
+    total_edges= sum(len(v) for v in graph.values())
+    non_empty = sum(1 for v in graph.values() if v)
+    print(f" Edges: {total_edges}   |   Nodes with outgoing calls: {non_empty}", file=sys.stderr)
+
+    if args.save:
+        out_dir = Path(args.out)
+        out_dir.mkdir(parents= True, exist_ok=True)
+
+        cg_path= out_dir / "call_graph.json"
+        sym_path = out_dir / "symbols.json"
+
+        with open(cg_path, "w", encoding="utf-8") as f:
+            json.dump(graph, f, indent=2)
+        with open(sym_path, "w", encoding="utf-8") as f:
+            json.dump(symbols, f, indent=2)
+
+        print(f"    Saved -> {cg_path}", file=sys.stderr)
+        print(f"    Saved -> {sym_path}", file=sys.stderr)
+    else:
+        print(json.dumps(graph, indent=2))
+
+if __name__ == "__main__":
+    main()
+

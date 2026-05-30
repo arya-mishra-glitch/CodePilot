@@ -25,3 +25,5 @@ node_modules/
 .env
 
 output.json
+symbols.json
+call_graph.json
