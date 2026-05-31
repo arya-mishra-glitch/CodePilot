@@ -68,6 +68,7 @@ class CodeUnit:
     
     code: str                   # the actual sourcce code text corresponding to that extracted unit
     language: str
+    docstring: Optional[str] = None              # extracted docstring / JSDoc comment (if any)
     children: list = field(default_factory=list)    #When creating a new object, call list() to generate the default value.
 
     def display_name(self) -> str:
@@ -139,7 +140,7 @@ def _first_id(node: Node, source: bytes,
 
 # Create a CodeUnit from an AST node
 
-def _make(kind, name, node, source, file_path, language, parent=None) -> CodeUnit:
+def _make(kind, name, node, source, file_path, language, parent=None, docstring=None) -> CodeUnit:
     return CodeUnit(
         kind= kind,
         name = name or "<anonymous>",
@@ -149,12 +150,88 @@ def _make(kind, name, node, source, file_path, language, parent=None) -> CodeUni
         parent=parent,
         code= _text(node, source),          #extract the raw source text/code
         language= language,
+        docstring=docstring,
     )
 
 
+
 #-------------------------------------------------------------------------------------------------------------------------------
-#Extractor Functions
+# Docstring Extractors
 #-------------------------------------------------------------------------------------------------------------------------------
+
+def _python_docstring(func_node: Node, source: bytes) -> Optional[str]:
+    """Extract the docstring from a Python function/class body.
+    
+    Looks for the first statement in the body block being a string literal.
+    Handles both single-line (') and multi-line triple-quoted strings.
+    """
+    # Find the 'block' child (the indented body)
+    body = next((c for c in func_node.children if c.type == "block"), None)
+    if not body:
+        return None
+    # First statement in the block
+    first_stmt = next((c for c in body.children
+                       if c.type == "expression_statement"), None)
+    if not first_stmt:
+        return None
+    # That expression must be a string literal
+    string_node = next((c for c in first_stmt.children
+                        if c.type == "string"), None)
+    if not string_node:
+        return None
+    raw = _text(string_node, source)
+    # Strip surrounding quotes: ''', """, ', "
+    for q in ('"""', "'''", '"', "'"):
+        if raw.startswith(q) and raw.endswith(q) and len(raw) > 2 * len(q):
+            return raw[len(q):-len(q)].strip()
+    return raw.strip()
+
+
+def _js_docstring(node: Node, source: bytes) -> Optional[str]:
+    """Extract a JSDoc / block comment that immediately precedes this node.
+
+    tree-sitter attaches comments as siblings *before* the node in the
+    parent's children list, not as children of the function node itself.
+    We therefore scan backwards through the raw source bytes from the
+    node's start position looking for a closing `*/` that sits on the
+    line(s) just above the function declaration.
+
+    Rules:
+    - Only matches `/* ... */` style comments (JSDoc uses `/** ... */`).
+    - The comment must end within 2 lines of the function start (allows
+      for blank lines between doc comment and `function` keyword).
+    - Returns the inner text with leading `*` stripped from each line.
+    """
+    func_start_byte = node.start_byte
+    func_start_line = node.start_point[0]   # 0-indexed
+
+    # Search backwards from the function start for '*/'
+    close = source.rfind(b"*/", 0, func_start_byte)
+    if close == -1:
+        return None
+
+    # Check the closing '*/' is within 2 lines of the function
+    close_line = source[:close].count(b"\n")
+    if func_start_line - close_line > 2:
+        return None
+
+    # Now find the matching '/*'
+    open_ = source.rfind(b"/*", 0, close)
+    if open_ == -1:
+        return None
+
+    comment_text = source[open_ + 2 : close].decode("utf-8", errors="replace")
+
+    # Clean up: strip leading whitespace and '*' from each line
+    lines = []
+    for line in comment_text.splitlines():
+        stripped = line.strip().lstrip("*").strip()
+        if stripped:
+            lines.append(stripped)
+    return "\n".join(lines) if lines else None
+
+
+
 
 
 
@@ -165,7 +242,8 @@ def _extract_python(node: Node, source: bytes, file_path: str, parent_class: Opt
     for child in node.children:
         if child.type == "class_definition":
             name = _first_id(child, source)
-            u = _make("class", name, child, source, file_path, "python", parent_class)
+            doc  = _python_docstring(child, source)
+            u = _make("class", name, child, source, file_path, "python", parent_class, docstring=doc)
             u.children = _extract_python(child, source, file_path, name)
             units.append(u)
 
@@ -174,19 +252,21 @@ def _extract_python(node: Node, source: bytes, file_path: str, parent_class: Opt
                         if c.type in ("function_definition", "class_definition")), None)  
             if inner:
                 name = _first_id(inner, source)
+                doc  = _python_docstring(inner, source)
                 if inner.type == "class_definition":
-                    u = _make("class", name, child, source, file_path, "python", parent_class)
+                    u = _make("class", name, child, source, file_path, "python", parent_class, docstring=doc)
                     u.children = _extract_python(inner, source, file_path, name)
                 else:
                     kind = "method" if parent_class else "function"
-                    u = _make(kind, name, child, source, file_path, "python", parent_class)
+                    u = _make(kind, name, child, source, file_path, "python", parent_class, docstring=doc)
                     u.children = _extract_python(inner, source, file_path, name)
                 units.append(u)
 
         elif child.type == "function_definition":
             name = _first_id(child, source)
+            doc  = _python_docstring(child, source)
             kind = "method" if parent_class else "function" #if its a class, treat is as a method, not function
-            u = _make(kind, name, child, source, file_path, "python", parent_class)
+            u = _make(kind, name, child, source, file_path, "python", parent_class, docstring=doc)
             u.children = _extract_python(child, source, file_path, name)
             units.append(u)
         else:
@@ -277,9 +357,10 @@ def _extract_javascript(node: Node, source: bytes, file_path: str,
                     if name == "exports":
                         name = _first_id(right, source)
                     if name:
+                        doc  = _js_docstring(child, source)   # child = expression_statement
                         kind = "method" if parent_class else "arrow_function"
                         # use child (expression_statement) so code includes "exports.X = ..."
-                        u= _make(kind, name, child, source, file_path, "javascript", parent_class)
+                        u= _make(kind, name, child, source, file_path, "javascript", parent_class, docstring=doc)
                         u.children = _extract_javascript(right, source, file_path, parent_class)
                         units.append(u)
                         continue
@@ -291,7 +372,8 @@ def _extract_javascript(node: Node, source: bytes, file_path: str,
 
         if child.type in ("class_declaration", "class"):
             name = _first_id(child, source)
-            u = _make("class", name, child, source, file_path, "javascript", parent_class)
+            doc  = _js_docstring(child, source)
+            u = _make("class", name, child, source, file_path, "javascript", parent_class, docstring=doc)
             u.children = _extract_javascript(child, source, file_path, name)
             units.append(u)
 
@@ -299,13 +381,15 @@ def _extract_javascript(node: Node, source: bytes, file_path: str,
             name = _first_id(child, source, 
                              types = ("identifier", "property_identifier", 
                                       "private_property_identifier"))
-            u = _make("method", name, child, source, file_path, "javascript", parent_class)
+            doc  = _js_docstring(child, source)
+            u = _make("method", name, child, source, file_path, "javascript", parent_class, docstring=doc)
             units.append(u)
         
         elif child.type in ("function_declaration", "generator_function_declaration"):  
             name = _first_id(child, source)
+            doc  = _js_docstring(child, source)
             kind = "method" if parent_class else "function"
-            u = _make(kind, name, child, source, file_path, "javascript", parent_class)
+            u = _make(kind, name, child, source, file_path, "javascript", parent_class, docstring=doc)
             units.append(u)
 
         elif child.type in ("lexical_declaration", "variable_declaration"):
@@ -317,9 +401,10 @@ def _extract_javascript(node: Node, source: bytes, file_path: str,
                                 if c.type in ("arrow_function", "function_expression")), None)
                     
                     if val and var_name:
+                        doc  = _js_docstring(child, source)   # comment precedes the `const` keyword
                         kind = "method" if parent_class else "arrow_function"
                         u= _make(kind, var_name, decl, source, file_path, 
-                                 "javascript", parent_class)
+                                 "javascript", parent_class, docstring=doc)
                         u.children = _extract_javascript(val, source, file_path, parent_class)
                         units.append(u)
                         found_callable = True
@@ -357,8 +442,9 @@ def _extract_javascript(node: Node, source: bytes, file_path: str,
                                           "string")), None)
                 name = _text(key, source).strip("'\"") if key else None
                 if name:
+                    doc  = _js_docstring(val, source)
                     kind = "method" if parent_class else "arrow_function"
-                    u = _make(kind, name, val, source, file_path, "javascript", parent_class)
+                    u = _make(kind, name, val, source, file_path, "javascript", parent_class, docstring=doc)
                     u.children = _extract_javascript(val, source, file_path, parent_class)
                     units.append(u)
             else:
@@ -374,8 +460,9 @@ def _extract_javascript(node: Node, source: bytes, file_path: str,
                 if name == "exports":
                     name = _first_id(right, source)
                 if name:
+                    doc  = _js_docstring(right, source)
                     kind = "method" if parent_class else "arrow_function"
-                    u = _make(kind, name, right, source, file_path, "javascript", parent_class)
+                    u = _make(kind, name, right, source, file_path, "javascript", parent_class, docstring=doc)
                     u.children = _extract_javascript(right, source, file_path, parent_class)
                     units.append(u)
             else:
@@ -639,6 +726,9 @@ def units_to_records(units: list[CodeUnit]) -> list[dict]:
     for u in _flatten(units):
         d = asdict(u)
         d.pop("children")
+        # Only include docstring key when there's actually a value (keeps JSON tidy)
+        if d.get("docstring") is None:
+            d.pop("docstring")
         rows.append(d)
     return rows
 
