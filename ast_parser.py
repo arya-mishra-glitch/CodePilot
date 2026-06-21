@@ -555,7 +555,7 @@ def _extract_java(node: Node, source: bytes, file_path: str,
             units.append(u)
         elif child.type == "method_declaration":
             name = _first_id(child, source)
-            units.append(_make("method", name, child, source, file_path, "java", parent_class))  # fix 6: added "java" and parent_class
+            units.append(_make("method", name, child, source, file_path, "java", parent_class))  
         elif child.type == "constructor_declaration":
             name = _first_id(child, source)
             units.append(_make("constructor", name, child, source, file_path, "java", parent_class))
@@ -617,7 +617,7 @@ def _extract_css (node: Node, source: bytes, file_path: str,
 
         elif child.type == "keyframes_statement":
             kname = next((c for c in child.children if c.type == "keyframes_name"), None)
-            name = f"@keyframes {_text(kname, source)}" if kname else "@keyframes"  # fix 7: - changed to =
+            name = f"@keyframes {_text(kname, source)}" if kname else "@keyframes" 
             units.append(_make("keyframes_rule", name, child, source, file_path, "css", parent))
         else:
             units.extend(_extract_css(child, source, file_path, parent))
@@ -641,14 +641,14 @@ def _extract_html(node: Node, source: bytes, file_path: str) -> list[CodeUnit]:
                 if inner:
                     block = _make("script_block", 
                                   f"<script> line {raw.start_point[0]+1}",
-                                  raw, source, file_path, "javascript")  # fix 9: "css" -> "javascript"
+                                  raw, source, file_path, "javascript") 
                     block.children = inner
                     units.append(block)
 
-        elif child.type == "style_element":  # fix 10: wrong indent + "Style_element" -> "style_element"
+        elif child.type == "style_element": 
             raw= next((c for c in child.children if c.type == "raw_text"), None)
             if raw:
-                css_src = source[raw.start_byte: raw.end_byte]  # fix 11: start_type -> start_byte
+                css_src = source[raw.start_byte: raw.end_byte]  
                 inner = _extract_css(_CSS_PARSER.parse(css_src).root_node,
                                      css_src, file_path)
                 if inner: 
