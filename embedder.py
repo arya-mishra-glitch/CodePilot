@@ -11,7 +11,7 @@ Both indexes cover the same set of symbols: every entry whose
 search_tier == "code".  CSS symbols (search_tier == "style") go into a
 separate, lighter FAISS index so style questions can be answered too.
 
-Output (written to --out directory, default ./my_index)
+Output (written to --out directory, default ./repo_index)
 ---------
     faiss_code.index    ← FAISS index for code symbols
     faiss_style.index   ← FAISS index for CSS/style symbols  (may be absent)
@@ -21,19 +21,19 @@ Output (written to --out directory, default ./my_index)
 Usage
 -----
     # Build index from symbols.json produced by Layer 2:
-    python embedder.py my_index/symbols.json
+    python embedder.py repo_index/symbols.json
 
     # Custom output directory:
-    python embedder.py my_index/symbols.json --out my_index
+    python embedder.py repo_index/symbols.json --out repo_index
 
     # Use a larger model (slower, better quality):
-    python embedder.py my_index/symbols.json --model all-mpnet-base-v2
+    python embedder.py repo_index/symbols.json --model all-mpnet-base-v2
 
     # Query the index interactively after building:
-    python embedder.py my_index/symbols.json --query "where is auth handled"
+    python embedder.py repo_index/symbols.json --query "where is auth handled"
 
     # Only query (skip rebuild if index already exists):
-    python embedder.py my_index/symbols.json --query "login flow" --no-rebuild
+    python embedder.py repo_index/symbols.json --query "login flow" --no-rebuild
 
 Dependencies
 ------------
@@ -65,8 +65,8 @@ from sentence_transformers import SentenceTransformer
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
 # How many results each sub-index returns before the merge step
-_FAISS_TOP_K = 10
-_BM25_TOP_K  = 10
+_FAISS_TOP_K = 15
+_BM25_TOP_K  = 15
 
 # Fusion weight: final_score = FAISS_WEIGHT * faiss_score + BM25_WEIGHT * bm25_score
 # Both scores are normalised to [0, 1] before combining.
@@ -89,20 +89,30 @@ BM25_WEIGHT  = 0.4
 # CSS symbols get a leaner representation since their "code" is already concise.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_CODE_PREVIEW_LINES = 20   # embed this many lines of source; rest is noise
+_CODE_PREVIEW_LINES = 35   # embed this many lines of source; rest is noise
+
+import re
+def _tokenize_query(question: str) -> list[str]:
+    raw = re.split(r"[\s\(\)\{\}\[\]<>,.;:\"'/\\|=\-+*&^%$#@!~`]+", question)
+    expanded = []
+    for tok in raw:
+        if tok:
+            sub = re.sub(r"([a-z])([A-Z])", r"\1 \2", tok).replace("_", " ")
+            expanded.extend(sub.split())
+    return [t.lower() for t in expanded if len(t) > 1]
 
 
-def _build_text(sym: dict) -> str:
-    """
+"""
     Build the text that will be embedded for a single symbol.
 
     We intentionally keep this readable rather than terse:
     the model was trained on natural English + code, so a
     sentence-like header helps it anchor the meaning.
-    """
+"""
+
+def _build_text(sym: dict, callers: list[str] | None = None, callees: list[str] | None = None) -> str:
     parts: list[str] = []
 
-    # Header line: "function login in auth/middleware.js"
     kind    = sym.get("kind",   "symbol")
     name    = sym.get("name",   "unknown")
     parent  = sym.get("parent", "")
@@ -111,19 +121,22 @@ def _build_text(sym: dict) -> str:
 
     parts.append(f"{kind} {display} in {file}")
 
-    # Docstring (Layer 1 captures these for both Python and JS via _js_docstring)
     doc = sym.get("docstring", "")
     if doc:
         parts.append(doc.strip())
 
-    # Source preview
+    # ← NEW: structural context
+    if callers:
+        parts.append(f"Called by: {', '.join(callers[:5])}")
+    if callees:
+        parts.append(f"Calls: {', '.join(callees[:5])}")
+
     code = sym.get("code", "")
     if code:
         lines = code.splitlines()[:_CODE_PREVIEW_LINES]
         parts.append("\n".join(lines))
 
     return "\n".join(parts)
-
 
 def _build_bm25_tokens(sym: dict) -> list[str]:
     """
@@ -156,6 +169,7 @@ def _build_bm25_tokens(sym: dict) -> list[str]:
 
 def build_index(
     symbols: list[dict],
+    call_graph = None,
     model_name: str = DEFAULT_MODEL,
     batch_size: int = 64,
 ) -> tuple[
@@ -182,6 +196,13 @@ def build_index(
     FAISS index corresponds to symbol i in the list — critical for lookup.
     """
     # ── Partition symbols ────────────────────────────────────────────────────
+    # build reverse map
+    callers_map: dict[str, list[str]] = {}
+    if call_graph:
+        for caller, callees in call_graph.items():
+            for callee in callees:
+                callers_map.setdefault(callee, []).append(caller)
+
     code_syms  = [s for s in symbols if s.get("search_tier") == "code"]
     style_syms = [s for s in symbols if s.get("search_tier") == "style"]
 
@@ -194,14 +215,24 @@ def build_index(
             "Did you run call_graph.py with tag_symbols() first?"
         )
 
+    def _get_display(s):
+        p = s.get("parent", "")
+        n = s.get("name", "")
+        return f"{p}.{n}" if p else n
+
     # ── Load model ───────────────────────────────────────────────────────────
     print(f"    Loading model '{model_name}' ...", file=sys.stderr)
     model = SentenceTransformer(model_name)
     dim = model.get_sentence_embedding_dimension()
     print(f"    Embedding dimension: {dim}", file=sys.stderr)
 
-    # ── Embed code symbols ───────────────────────────────────────────────────
-    code_texts = [_build_text(s) for s in code_syms]
+    # ── Embed code symbols (with call-graph context) ─────────────────────────
+    code_texts = []
+    for s in code_syms:
+        display = _get_display(s)
+        callers = callers_map.get(display, [])
+        callees = call_graph.get(display, []) if call_graph else []
+        code_texts.append(_build_text(s, callers=callers, callees=callees))
     print(f"    Encoding {len(code_texts)} code symbols ...", file=sys.stderr)
     code_vecs: np.ndarray = model.encode(
         code_texts,
@@ -331,6 +362,7 @@ def query(
     top_k:       int = 5,
     faiss_style: Optional[faiss.Index] = None,
     style_syms:  list[dict] | None = None,
+    model:       Optional[SentenceTransformer] = None,  # pass cached model to avoid reload
 ) -> list[dict]:
     """
     Retrieve the top_k most relevant symbols for a plain-English question.
@@ -353,7 +385,8 @@ def query(
     question   : raw user question string
     top_k      : number of code results to return
     """
-    model = SentenceTransformer(model_name)
+    if model is None:
+        model = SentenceTransformer(model_name)
 
     # ── FAISS retrieval ───────────────────────────────────────────────────────
     q_vec = model.encode([question], normalize_embeddings=True,
@@ -363,7 +396,7 @@ def query(
     faiss_ranking: list[int] = faiss_ids[0].tolist()   # list of symbol row indices
 
     # ── BM25 retrieval ────────────────────────────────────────────────────────
-    tokens = _build_bm25_tokens({"code": question, "name": question})
+    tokens = _tokenize_query(question)
     bm25_scores: np.ndarray = bm25_code.get_scores(tokens)
     bm25_k = min(_BM25_TOP_K, len(code_syms))
     bm25_ranking: list[int] = np.argsort(bm25_scores)[::-1][:bm25_k].tolist()
@@ -426,11 +459,15 @@ def main() -> None:
     )
     ap.add_argument(
         "symbols_json",
-        help="Path to symbols.json produced by Layer 2",
+        help="Path to symbols.json produced by Layer 1",
     )
     ap.add_argument(
-        "--out", default="my_index",
-        help="Output directory for index files (default: ./my_index)",
+        "call_graph.json",
+        help="Path to call_graph produced by Layer 2"
+    )
+    ap.add_argument(
+        "--out", default="repo_index",
+        help="Output directory for index files (default: ./repo_index)",
     )
     ap.add_argument(
         "--model", default=DEFAULT_MODEL,

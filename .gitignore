@@ -30,5 +30,8 @@ call_graph.json
 faiss_code.index
 bm25_code.pkl
 index_meta.json
+index_info.json
+faiss_style.index
+eval.py
 90MB models
 .cache

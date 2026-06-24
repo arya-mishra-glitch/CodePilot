@@ -324,7 +324,7 @@ def tag_symbols(symbols: list[dict]) -> list[dict]:
         kind = s.get("kind", "")
         lang = s.get("language", "")
 
-        if lang in _SKIP_LANGUAGES or kind in _SKIP_KINDS:
+        if kind in _SKIP_KINDS or (lang in _SKIP_LANGUAGES and kind not in _STYLE_KINDS):
             s["searchable"] = False
             s["search_tier"] = "skip"
         elif kind in _STYLE_KINDS:
