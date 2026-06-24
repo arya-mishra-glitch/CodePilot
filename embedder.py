@@ -1,39 +1,39 @@
 """
-Layer 3 - Search Index Builder (Embeddings + FAISS + BM25)
-==========================================================
-Reads the tagged sybols.json produced by Layer 2 and builds two parallel
+Layer 3 — Search Index Builder (Embeddings + FAISS + BM25)
+===========================================================
+Reads the tagged symbols.json produced by Layer 2 and builds two parallel
 search indexes:
 
-    1. FAISS - dense vector index (semantic similarity)
-    2. BM25 - sparse keyword index (exact / token-overlap search)
+    1. FAISS  — dense vector index (semantic similarity)
+    2. BM25   — sparse keyword index (exact / token-overlap search)
 
 Both indexes cover the same set of symbols: every entry whose
-search_tier == "code". CSS symbols (search_tier == "style") go into a 
+search_tier == "code".  CSS symbols (search_tier == "style") go into a
 separate, lighter FAISS index so style questions can be answered too.
 
-Output (written to --out directory ./repo_index)
------------
-    faiss_code.index    <- FAISS index for code symbols
-    faiss_style.index   <- FAISS index for CSS/style symbols (may be absent)
-    bm25_code.pkl       <- BM25 index for code.symbols
-    index_meta.json     <- id -> symbol mapping consumed by Layers 4 and 5
+Output (written to --out directory, default ./my_index)
+---------
+    faiss_code.index    ← FAISS index for code symbols
+    faiss_style.index   ← FAISS index for CSS/style symbols  (may be absent)
+    bm25_code.pkl       ← BM25 index for code symbols
+    index_meta.json     ← id → symbol mapping consumed by Layers 4 & 5
 
 Usage
 -----
     # Build index from symbols.json produced by Layer 2:
-    python embedder.py repo_index/symbols.json
- 
+    python embedder.py my_index/symbols.json
+
     # Custom output directory:
-    python embedder.py repo_index/symbols.json --out my_index
- 
+    python embedder.py my_index/symbols.json --out my_index
+
     # Use a larger model (slower, better quality):
-    python embedder.py repo_index/symbols.json --model all-mpnet-base-v2
- 
+    python embedder.py my_index/symbols.json --model all-mpnet-base-v2
+
     # Query the index interactively after building:
-    python embedder.py repo_index/symbols.json --query "where is auth handled"
- 
+    python embedder.py my_index/symbols.json --query "where is auth handled"
+
     # Only query (skip rebuild if index already exists):
-    python embedder.py repo_index/symbols.json --query "login flow" --no-rebuild
+    python embedder.py my_index/symbols.json --query "login flow" --no-rebuild
 
 Dependencies
 ------------
@@ -42,7 +42,7 @@ Dependencies
 
 from __future__ import annotations
 
-import argparse 
+import argparse
 import json
 import os
 import pickle
@@ -55,29 +55,31 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
-#------------------------------------------------------------------------------
-#Constants
-#------------------------------------------------------------------------------
 
-# Default model: fast + good for code. Swap for all-mpnet-base-v2 for ~5%
-# better retrieval at ~3x the encoding time
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────────────────────
 
+# Default model: fast + good for code.  Swap for all-mpnet-base-v2 for ~5%
+# better retrieval at ~3× the encoding time.
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
-#how many results each sub - index returns before the merge step
+# How many results each sub-index returns before the merge step
 _FAISS_TOP_K = 10
-_BM25_TOP_K = 10
+_BM25_TOP_K  = 10
 
-# Fusion weight: final_score = FAISS_WEIGHT * fiass_score + BM25_WEIGHT * bm25_score
-# Both scores are normalized to [0,1] before combining
+# Fusion weight: final_score = FAISS_WEIGHT * faiss_score + BM25_WEIGHT * bm25_score
+# Both scores are normalised to [0, 1] before combining.
 FAISS_WEIGHT = 0.6
-BM25_WEIGHT = 0.4
+BM25_WEIGHT  = 0.4
 
-#------------------------------------------------------------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Text representation
 #
+# The embedding quality is the biggest lever you have in Layer 3.
 # A function whose code is just "const x = () => {}" embeds poorly on its own.
-# We build a richer text by combining:
+# We build a richer text blob by combining:
 #   • display_name  — unique identifier that the model can tokenise meaningfully
 #   • docstring     — natural-language description when present  (0 in your current
 #                     corpus, but leave the hook here for when you add them)
@@ -85,31 +87,31 @@ BM25_WEIGHT = 0.4
 #   • first N lines of code — enough structure for the model, avoids padding waste
 #
 # CSS symbols get a leaner representation since their "code" is already concise.
-#-------------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
-_CODE_PREVIEW_LINES = 20 #embed this many lines of source; rest is noise
+_CODE_PREVIEW_LINES = 20   # embed this many lines of source; rest is noise
+
 
 def _build_text(sym: dict) -> str:
     """
-    Build the text that will be embedded for a single symbol
+    Build the text that will be embedded for a single symbol.
 
-    Keep this readabel rather than tese intentionally:
-    the model was trained on natural English + code, so a 
-    sentence-like header helps it achor the meaning.
+    We intentionally keep this readable rather than terse:
+    the model was trained on natural English + code, so a
+    sentence-like header helps it anchor the meaning.
     """
     parts: list[str] = []
 
-    #Header line: "function login in auth/middleware.js"
-    kind = sym.get("kind", "symbol")
-    name = sym.get("name", "unknown")
-    parent= sym.get("parent", "")
-    file = sym.get("file", "")
+    # Header line: "function login in auth/middleware.js"
+    kind    = sym.get("kind",   "symbol")
+    name    = sym.get("name",   "unknown")
+    parent  = sym.get("parent", "")
+    file    = sym.get("file",   "")
     display = f"{parent}.{name}" if parent else name
 
     parts.append(f"{kind} {display} in {file}")
 
-    #Docstring (Layer 1 captures these for Python and JS)
-
+    # Docstring (Layer 1 captures these for both Python and JS via _js_docstring)
     doc = sym.get("docstring", "")
     if doc:
         parts.append(doc.strip())
@@ -122,33 +124,35 @@ def _build_text(sym: dict) -> str:
 
     return "\n".join(parts)
 
+
 def _build_bm25_tokens(sym: dict) -> list[str]:
     """
-    Tokenize a symbol for BM25.
+    Tokenise a symbol for BM25.
 
     BM25 is a bag-of-words model, so we want every meaningful token:
     split on whitespace AND common code punctuation so that
     "getUserById" becomes ["getUserById", "get", "User", "By", "Id"]
-    giving both exact-name matched and sub-word matches.
+    giving both exact-name matches and sub-word matches.
     """
     import re
     text = _build_text(sym)
-    #Split on whitespace + code separators
+    # Split on whitespace + code separators
     raw_tokens = re.split(r"[\s\(\)\{\}\[\]<>,.;:\"'/\\|=\-+*&^%$#@!~`]+", text)
-    # camelCase / PascalCase split: "getUserById" -> ["get", "User", "By", "Id"]
+    # camelCase / PascalCase split: "getUserById" → ["get", "User", "By", "Id"]
     expanded: list[str] = []
     for tok in raw_tokens:
         if tok:
-            #Insert space before each uppercase run following a lowercase
+            # Insert space before each uppercase run following a lowercase
             sub = re.sub(r"([a-z])([A-Z])", r"\1 \2", tok)
-            #Split snake_case
+            # Split snake_case
             sub = sub.replace("_", " ")
             expanded.extend(sub.split())
     return [t.lower() for t in expanded if len(t) > 1]
 
-#-----------------------------------------------------------------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Index building
-#-----------------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
 def build_index(
     symbols: list[dict],
@@ -166,108 +170,108 @@ def build_index(
 
     Parameters
     ----------
-    symbols     : flat list of symbols dicts from Layer 2's symbols.json
-    model_name  : sentence-transformers model name
-    batch_size  : number of texts to embed per forward pass
+    symbols    : flat list of symbol dicts from Layer 2's symbols.json
+    model_name : sentence-transformers model name
+    batch_size : number of texts to embed per forward pass
 
     Returns
     -------
     (faiss_code, bm25_code, faiss_style, code_syms, style_syms)
 
-    The *_syms list are the ordered lists of symbols whose row i in the
-    FAISS index corresponds to symbol i in the list - critical for lookup.
+    The *_syms lists are the ordered lists of symbols whose row i in the
+    FAISS index corresponds to symbol i in the list — critical for lookup.
     """
-    #--- Partition symbols----------------------------------------------------
-    code_syms = [s for s in symbols if s.get("search_tier") == "code"]
+    # ── Partition symbols ────────────────────────────────────────────────────
+    code_syms  = [s for s in symbols if s.get("search_tier") == "code"]
     style_syms = [s for s in symbols if s.get("search_tier") == "style"]
 
     print(f"    Symbols to embed: {len(code_syms)} code, {len(style_syms)} style",
           file=sys.stderr)
-    
+
     if not code_syms:
         raise ValueError(
-            "No symbols with search_tier='code' found." 
-            "DId you run the call_graph.py with tag_symbols() first?"
+            "No symbols with search_tier='code' found. "
+            "Did you run call_graph.py with tag_symbols() first?"
         )
-    
-    #---Load model-------------------------------------------------------------
-    print(f"    loading model '{model_name}' ...", file=sys.stderr)
-    model = SentenceTransformer(model_name)
-    dim = model.get_embedding_dimension()
-    print(f"    Embedding dimesnion: {dim}", file=sys.stderr)
 
-    #--------------------------------------------------------------------------
+    # ── Load model ───────────────────────────────────────────────────────────
+    print(f"    Loading model '{model_name}' ...", file=sys.stderr)
+    model = SentenceTransformer(model_name)
+    dim = model.get_sentence_embedding_dimension()
+    print(f"    Embedding dimension: {dim}", file=sys.stderr)
+
+    # ── Embed code symbols ───────────────────────────────────────────────────
     code_texts = [_build_text(s) for s in code_syms]
     print(f"    Encoding {len(code_texts)} code symbols ...", file=sys.stderr)
-    code_vecs: np.ndarray = model.encode (
+    code_vecs: np.ndarray = model.encode(
         code_texts,
-        batch_size = batch_size,
-        show_progress_bar = True,
-        convert_to_numpy= True,
-        normalize_embeddings = True,    #cosine similarity via inner product
-    )                                   #shape: (N, dim)
+        batch_size=batch_size,
+        show_progress_bar=True,
+        convert_to_numpy=True,
+        normalize_embeddings=True,   # cosine similarity via inner product
+    )                                 # shape: (N, dim)
 
-    # ---Build FAISS index (code) ------------------------------------------------
-    # IndexFlatIP = exact inner-product search. WIth normalsed vectors this
-    # is equivalent to cosine similarity. For >100k symbols, swap to 
-    # IndexIVFFlat for `10x speed at tiny accuracy cost.
+    # ── Build FAISS index (code) ─────────────────────────────────────────────
+    # IndexFlatIP = exact inner-product search.  With normalised vectors this
+    # is equivalent to cosine similarity.  For >100k symbols, swap to
+    # IndexIVFFlat for ~10× speed at tiny accuracy cost.
     faiss_code = faiss.IndexFlatIP(dim)
-    faiss_code.add(code_vecs.astype(np.float32)) # type: ignore[arg-type]
+    faiss_code.add(code_vecs.astype(np.float32))
     print(f"    FAISS code index: {faiss_code.ntotal} vectors", file=sys.stderr)
 
-    #---Build BM25 index (code) --------------------------------------------------
-    tokenized = [_build_bm25_tokens(s) for s in code_syms]
-    bm25_code = BM25Okapi(tokenized)
+    # ── Build BM25 index (code) ──────────────────────────────────────────────
+    tokenised = [_build_bm25_tokens(s) for s in code_syms]
+    bm25_code = BM25Okapi(tokenised)
     print(f"    BM25 code index built.", file=sys.stderr)
 
-    #---Embed + index style symbols (optional)------------------------------------
+    # ── Embed + index style symbols (optional) ───────────────────────────────
     faiss_style: Optional[faiss.Index] = None
     if style_syms:
         style_texts = [_build_text(s) for s in style_syms]
-        print(f"    Encoding {len(style_texts)} for s in style_syms)")
+        print(f"    Encoding {len(style_texts)} style symbols ...", file=sys.stderr)
         style_vecs: np.ndarray = model.encode(
             style_texts,
-            batch_size = batch_size,
+            batch_size=batch_size,
             show_progress_bar=True,
-            convert_to_numpy = True,
-            normalize_embeddings = True,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
         )
         faiss_style = faiss.IndexFlatIP(dim)
-        faiss_style.add(style_vecs.astype(np.float32)) # type: ignore[arg-type]
-        print(f"    FAISS style index: {faiss_style.ntotal} vectors", file = sys.stderr)
+        faiss_style.add(style_vecs.astype(np.float32))
+        print(f"    FAISS style index: {faiss_style.ntotal} vectors", file=sys.stderr)
     else:
-        print("     No style symbols - skipped style index.", file=sys.stderr)
+        print("    No style symbols — skipping style index.", file=sys.stderr)
 
     return faiss_code, bm25_code, faiss_style, code_syms, style_syms
 
 
-#--------------------------------------------------------------------------------
-# Save/Load
-#--------------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Save / Load
+# ─────────────────────────────────────────────────────────────────────────────
 
 def save_index(
     out_dir: str | Path,
-    faiss_code: faiss.Index,
-    bm25_code: BM25Okapi,
+    faiss_code:  faiss.Index,
+    bm25_code:   BM25Okapi,
     faiss_style: Optional[faiss.Index],
-    code_syms:  list[dict],
-    style_syms: list[dict],
+    code_syms:   list[dict],
+    style_syms:  list[dict],
 ) -> None:
     """
-    Write all index artefacts to out dir
+    Write all index artefacts to out_dir.
 
-    File layout 
+    File layout
     -----------
-        faiss_code.index    - FAISS code index
-        fiass_style.index   - FAISS style index (only written when non - empty)
-        bm25_code.pkl       - BM25 code index (pickle)
-        index_meta.json     - {
-                                "code":  [ sym, ... ],   #ordered by FAISS row
-                                "style": [ sym, ... ]    #ordered by FAISS row
-                            }
+        faiss_code.index    — FAISS code index
+        faiss_style.index   — FAISS style index (only written when non-empty)
+        bm25_code.pkl       — BM25 code index (pickle)
+        index_meta.json     — {
+                                  "code":  [ sym, ... ],   # ordered by FAISS row
+                                  "style": [ sym, ... ]    # ordered by FAISS row
+                              }
 
-        index_meta.json is the single source of truth that maps FAISS row -> symbol.
-        Layer 4 will copy it verbatim; Layer 5 looks up results here.
+    index_meta.json is the single source of truth that maps FAISS row → symbol.
+    Layer 4 will copy it verbatim; Layer 5 looks up results here.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -277,7 +281,7 @@ def save_index(
 
     with open(out / "bm25_code.pkl", "wb") as f:
         pickle.dump(bm25_code, f)
-    print(f"    Saved -> {out / 'faiss_style.index'}", file=sys.stderr)
+    print(f"    Saved -> {out / 'bm25_code.pkl'}", file=sys.stderr)
 
     if faiss_style is not None:
         faiss.write_index(faiss_style, str(out / "faiss_style.index"))
@@ -293,7 +297,7 @@ def load_index(
     index_dir: str | Path,
 ) -> tuple[faiss.Index, BM25Okapi, Optional[faiss.Index], list[dict], list[dict]]:
     """
-    Load a previously saved index from disk. Inverse of save_index().
+    Load a previously saved index from disk.  Inverse of save_index().
     Raises FileNotFoundError if the required files are missing.
     """
     d = Path(index_dir)
@@ -305,68 +309,66 @@ def load_index(
 
     faiss_style: Optional[faiss.Index] = None
     style_path = d / "faiss_style.index"
-
     if style_path.exists():
         faiss_style = faiss.read_index(str(style_path))
-    
-    with open(d / "index_meta.json", "r", encoding = "utf-8") as f:
+
+    with open(d / "index_meta.json", "r", encoding="utf-8") as f:
         meta = json.load(f)
-    
 
     return faiss_code, bm25_code, faiss_style, meta["code"], meta.get("style", [])
 
-#------------------------------------------------------------------------------------------------------
-#query / retrieval
-#------------------------------------------------------------------------------------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Query / Retrieval
+# ─────────────────────────────────────────────────────────────────────────────
 
 def query(
-    question:   str,
-    faiss_code: faiss.Index,
-    bm25_code:  BM25Okapi,
-    code_syms:  list[dict],
-    model_name: str = DEFAULT_MODEL,
-    top_k:      int = 5,
+    question:    str,
+    faiss_code:  faiss.Index,
+    bm25_code:   BM25Okapi,
+    code_syms:   list[dict],
+    model_name:  str = DEFAULT_MODEL,
+    top_k:       int = 5,
     faiss_style: Optional[faiss.Index] = None,
-    style_syms: list[dict] | None = None,
+    style_syms:  list[dict] | None = None,
 ) -> list[dict]:
     """
-    Retrieve the top_k most revelant symbols for a plain - English question.
+    Retrieve the top_k most relevant symbols for a plain-English question.
 
     Strategy: Reciprocal Rank Fusion (RRF)
-    ---------------------------------------
-    Rather than normalizing raw scored (which have different scales)
+    ----------------------------------------
+    Rather than normalising raw scores (which have different scales),
     RRF combines rankings:
 
-        rrf_score(d) =  Σ 1 / (k + rank_i(d))
-                        i ∈ {faiss, bm25}
+        rrf_score(d) = Σ  1 / (k + rank_i(d))
+                      i ∈ {faiss, bm25}
 
-        where k = 60 is the standard RRF constant. This is robust and parameter - free.
+    where k=60 is the standard RRF constant.  This is robust and parameter-free.
 
-        If style ymbols are provided, style results are appended after code results
-        (they're kept separate so Layer 5 can choose to cite them differently)
+    If style symbols are provided, style results are appended after code results
+    (they're kept separate so Layer 5 can choose to cite them differently).
 
-        Parameters
-        ----------
-        question    : raw user question string
-        top_k       : number of code results to return
+    Parameters
+    ----------
+    question   : raw user question string
+    top_k      : number of code results to return
     """
     model = SentenceTransformer(model_name)
 
-    #---FAISS retrieval-----------------------------------------------------------------------------------------
+    # ── FAISS retrieval ───────────────────────────────────────────────────────
+    q_vec = model.encode([question], normalize_embeddings=True,
+                         convert_to_numpy=True).astype(np.float32)
+    faiss_k = min(_FAISS_TOP_K, faiss_code.ntotal)
+    _, faiss_ids = faiss_code.search(q_vec, faiss_k)   # shape (1, k)
+    faiss_ranking: list[int] = faiss_ids[0].tolist()   # list of symbol row indices
 
-    q_vec = model.encode([question], normalize_embeddings = True,
-                        convert_to_numpy = True).astype(np.float32) #embed the query, mornalize all scored to be within 0 - 1
-    faiss_k = min(_FAISS_TOP_K, faiss_code.ntotal)  #fetch top-k results
-    _, faiss_ids = faiss_code.search(q_vec, faiss_k)    #shape (1, k)   #faiss returns scores and ranks. We need only the ranks cuz we use RRF
-    faiss_ranking: list[int] = faiss_ids[0].tolist()    #list of symbol row indices
-
-    #---BM25 retrieval -----------------------------------------------------------------------------------------
+    # ── BM25 retrieval ────────────────────────────────────────────────────────
     tokens = _build_bm25_tokens({"code": question, "name": question})
     bm25_scores: np.ndarray = bm25_code.get_scores(tokens)
     bm25_k = min(_BM25_TOP_K, len(code_syms))
     bm25_ranking: list[int] = np.argsort(bm25_scores)[::-1][:bm25_k].tolist()
 
-   # ── Reciprocal Rank Fusion ────────────────────────────────────────────────
+    # ── Reciprocal Rank Fusion ────────────────────────────────────────────────
     RRF_K = 60
     scores: dict[int, float] = {}
     for rank, idx in enumerate(faiss_ranking):
@@ -391,8 +393,9 @@ def query(
             sym["_score"] = None   # style scores not fused — kept separate
             sym["_tier"]  = "style"
             results.append(sym)
- 
+
     return results
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
@@ -414,7 +417,7 @@ def _print_results(results: list[dict]) -> None:
         code_preview = "\n".join(sym.get("code", "").splitlines()[:3])
         if code_preview:
             print("       " + code_preview.replace("\n", "\n       "))
- 
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(
@@ -426,8 +429,8 @@ def main() -> None:
         help="Path to symbols.json produced by Layer 2",
     )
     ap.add_argument(
-        "--out", default="repo_index",
-        help="Output directory for index files (default: ./repo_index)",
+        "--out", default="my_index",
+        help="Output directory for index files (default: ./my_index)",
     )
     ap.add_argument(
         "--model", default=DEFAULT_MODEL,
@@ -450,9 +453,9 @@ def main() -> None:
         help="Skip index rebuild; load existing index from --out and run --query only",
     )
     args = ap.parse_args()
- 
+
     out_dir = Path(args.out)
- 
+
     if args.no_rebuild:
         # ── Load existing index ───────────────────────────────────────────────
         print(f"\n  Loading index from {out_dir} ...", file=sys.stderr)
@@ -465,29 +468,31 @@ def main() -> None:
         if not sym_path.exists():
             print(f"Error: '{sym_path}' not found.", file=sys.stderr)
             sys.exit(1)
- 
+
         with open(sym_path, "r", encoding="utf-8") as f:
             symbols: list[dict] = json.load(f)
         print(f"\n  Loaded {len(symbols)} symbols from {sym_path}", file=sys.stderr)
- 
+
         # ── Build ─────────────────────────────────────────────────────────────
         faiss_code, bm25_code, faiss_style, code_syms, style_syms = build_index(
             symbols,
             model_name=args.model,
             batch_size=args.batch_size,
         )
- 
+
         # ── Save ──────────────────────────────────────────────────────────────
         save_index(out_dir, faiss_code, bm25_code, faiss_style, code_syms, style_syms)
         print(f"\n  Index saved to {out_dir}/", file=sys.stderr)
         print(f"  Files written:", file=sys.stderr)
-        for fname in ["faiss_code.index", "bm25_code.pkl",
-                      "faiss_style.index", "index_meta.json"]:
+        for fname in ["faiss_code.index", "bm25_code.pkl", "index_meta.json"]:
             p = out_dir / fname
-            if p.exists():
-                size_kb = p.stat().st_size // 1024
-                print(f"    {fname}  ({size_kb} KB)", file=sys.stderr)
- 
+            size_kb = p.stat().st_size // 1024
+            print(f"    {fname}  ({size_kb} KB)", file=sys.stderr)
+        style_p = out_dir / "faiss_style.index"
+        if style_p.exists():
+            size_kb = style_p.stat().st_size // 1024
+            print(f"    faiss_style.index  ({size_kb} KB)", file=sys.stderr)
+
     # ── Optional query ────────────────────────────────────────────────────────
     if args.query:
         print(f"\n  Query: \"{args.query}\"", file=sys.stderr)
@@ -502,8 +507,7 @@ def main() -> None:
         _print_results(results)
     elif args.no_rebuild:
         print("\n  Index loaded OK. Pass --query <question> to search.", file=sys.stderr)
- 
- 
+
+
 if __name__ == "__main__":
     main()
- 
