@@ -27,3 +27,8 @@ node_modules/
 output.json
 symbols.json
 call_graph.json
+faiss_code.index
+bm25_code.pkl
+index_meta.json
+90MB models
+.cache
