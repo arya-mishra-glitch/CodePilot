@@ -45,11 +45,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import textwrap
 from pathlib import Path
 from typing import Optional
-import re
+
+# Load .env from the project root (silent if absent — real env vars take priority)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)   # won't overwrite vars already set in the shell
+except ImportError:
+    pass  # python-dotenv optional; fall back to os.environ
 
 # ── Layer imports ─────────────────────────────────────────────────────────────
 try:
@@ -69,7 +76,7 @@ except ImportError as e:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # How many symbols to retrieve from the index before call-graph expansion
-_RETRIEVAL_TOP_K = 8
+_RETRIEVAL_TOP_K = 5
 
 # Max call-graph hops to follow from each retrieved symbol.
 # 1 = direct callees/callers only.  2 = one more level out.
@@ -88,7 +95,114 @@ _MAX_CODE_LINES = 40
 _MAX_OUTPUT_TOKENS = 1024
 _TEMPERATURE       = 0.2   # low temperature = factual, less creative
 
+# Layer 5.5 — threshold-gated query expansion
+# If the top RRF score after first-pass retrieval is below this, retrieval
+# has likely failed and we trigger symbol-aware query expansion.
+# RRF max per ranker ≈ 1/(60+1) ≈ 0.0164.  A top score < 0.025 means the
+# best candidate appeared in only one ranker and not at rank 1.
+_EXPANSION_THRESHOLD = 0.025
 
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 5.5 — Threshold-gated query expansion
+#
+# Two-level pipeline, both repo-aware (no hardcoded domain terms):
+#
+#   Level 1 — symbol-name expansion
+#     Tokenize the query.  For each token that fuzzy-matches a symbol name,
+#     split that symbol name (camelCase + snake_case) and append the parts.
+#     "phase" → matches getPregnancyStatus → appends "get pregnancy status"
+#
+#   Level 2 — call-graph neighbour expansion
+#     For every symbol surfaced in the first-pass retrieval, pull its
+#     callers and callees from the call graph, split their names, and
+#     append those tokens too.
+#     getPregnancyStatus callee → pregnancyRows → appends "pregnancy rows"
+#
+# Both levels only fire when top_score < _EXPANSION_THRESHOLD, so fast
+# queries (score already good) pay zero extra cost.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _name_to_tokens(name: str) -> list[str]:
+    """
+    Split a camelCase / PascalCase / snake_case identifier into lowercase tokens.
+
+    Examples
+    --------
+    "getPregnancyStatus" → ["get", "pregnancy", "status"]
+    "pregnancy_profile"  → ["pregnancy", "profile"]
+    "BM25Okapi"          → ["b", "m25", "okapi"]  (best-effort)
+    """
+    # camelCase / PascalCase split
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", name)
+    # snake_case split
+    s = s.replace("_", " ")
+    return [t.lower() for t in s.split() if len(t) > 1]
+
+
+def _expand_l1_symbol_names(question: str, code_syms: list[dict]) -> str:
+    """
+    Level 1: for each query token that appears inside a symbol name,
+    split that symbol name and append the parts to the query.
+
+    This is repo-aware — the expansion vocabulary comes entirely from the
+    symbol names extracted by Layer 1, so it works on any codebase.
+    """
+    query_tokens = {t for t in re.split(r"\W+", question.lower()) if len(t) > 3}
+
+    appended: set[str] = set()
+    for sym in code_syms:
+        name = sym.get("name", "")
+        if not name:
+            continue
+        name_lower = name.lower()
+        if any(tok in name_lower for tok in query_tokens):
+            for part in _name_to_tokens(name):
+                appended.add(part)
+
+    if not appended:
+        return question
+
+    extra = " ".join(sorted(appended))
+    print(f"  [expand-L1] appending symbol tokens: {extra}", file=sys.stderr)
+    return f"{question} {extra}"
+
+
+def _expand_l2_call_graph(
+    question:      str,
+    first_pass:    list[dict],
+    call_graph:    dict[str, list[str]],
+    callers_map:   dict[str, list[str]],
+) -> str:
+    """
+    Level 2: take the symbols returned by the first-pass retrieval,
+    walk one hop in the call graph (both directions), split neighbour
+    names into tokens, and append them.
+
+    This anchors the re-query in the actual graph neighbourhood of whatever
+    the retriever found first — even if that first pass was imperfect.
+    """
+    appended: set[str] = set()
+    for sym in first_pass:
+        name   = sym.get("name", "")
+        parent = sym.get("parent", "")
+        display = f"{parent}.{name}" if parent else name
+
+        neighbours = call_graph.get(display, []) + callers_map.get(display, [])
+        for nb_name in neighbours:
+            # nb_name may be "Class.method" or bare "functionName"
+            bare = nb_name.split(".")[-1]
+            for part in _name_to_tokens(bare):
+                appended.add(part)
+
+    if not appended:
+        return question
+
+    extra = " ".join(sorted(appended))
+    print(f"  [expand-L2] appending call-graph tokens: {extra}", file=sys.stderr)
+    return f"{question} {extra}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -381,6 +495,12 @@ class QueryEngine:
             self._sym_by_name[display] = sym
             self._sym_by_name[name]    = sym   # also index by bare name
 
+        # Reverse call-graph (callee → [callers]) — used by L2 expansion
+        self._callers_map: dict[str, list[str]] = {}
+        for caller, callees in self.call_graph.items():
+            for callee in callees:
+                self._callers_map.setdefault(callee, []).append(caller)
+
         print(
             f"  Ready — {len(self.code_syms)} code symbols, "
             f"{len(self.call_graph)} call graph nodes, "
@@ -407,7 +527,7 @@ class QueryEngine:
           answer_text     : the LLM's answer string
           context_symbols : the symbols that were included in the prompt
         """
-        # ── Step 1: Retrieve ──────────────────────────────────────────────────
+        # ── Step 1: First-pass retrieval ─────────────────────────────────────
         retrieved = emb.query(
             question,
             self.faiss_code,
@@ -419,6 +539,39 @@ class QueryEngine:
             style_syms=self.style_syms,
             model=self._embed_model,          # ← use cached model
         )
+
+        # ── Step 1.5: Layer 5.5 — threshold-gated query expansion ────────────
+        top_score = retrieved[0].get("_score", 0.0) if retrieved else 0.0
+        if top_score < _EXPANSION_THRESHOLD:
+            print(
+                f"  [expand] top score {top_score:.4f} < {_EXPANSION_THRESHOLD} "
+                f"— triggering query expansion",
+                file=sys.stderr,
+            )
+            # L1: symbol-name expansion (repo vocab, no API cost)
+            expanded = _expand_l1_symbol_names(question, self.code_syms)
+            # L2: call-graph neighbour expansion on top of L1
+            expanded = _expand_l2_call_graph(
+                expanded, retrieved, self.call_graph, self._callers_map
+            )
+            # Re-retrieve only if we actually added something
+            if expanded != question:
+                retrieved = emb.query(
+                    expanded,
+                    self.faiss_code,
+                    self.bm25_code,
+                    self.code_syms,
+                    model_name=self.model_name,
+                    top_k=self.top_k,
+                    faiss_style=self.faiss_style,
+                    style_syms=self.style_syms,
+                    model=self._embed_model,
+                )
+                new_top = retrieved[0].get("_score", 0.0) if retrieved else 0.0
+                print(
+                    f"  [expand] re-retrieval top score: {new_top:.4f}",
+                    file=sys.stderr,
+                )
 
         # ── Step 2: Expand via call graph ─────────────────────────────────────
         context_syms = _expand_with_call_graph(
