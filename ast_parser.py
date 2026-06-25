@@ -65,7 +65,7 @@ class CodeUnit:
     file: str
     start_line: int
     end_line: int
-    parent: Optional[str]       #enclosing class/ selector/ route prefix
+    parent: Optional[str]      #enclosing class/ selector/ route prefix
     
     code: str                   # the actual sourcce code text corresponding to that extracted unit
     language: str
@@ -759,6 +759,7 @@ def units_to_records(units: list[CodeUnit]) -> list[dict]:
     rows = []
     for u in _flatten(units):
         d = asdict(u)
+        d["parent"] = u.parent or "" 
         d.pop("children")
         # Only include docstring key when there's actually a value (keeps JSON tidy)
         if d.get("docstring") is None:

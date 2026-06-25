@@ -1,0 +1,142 @@
+[
+  {
+    "question": "how to check for existing active pregnancy",
+    "reference_answer": "the code checks for an existing active pregnancy by querying the pregnancy_profile table with the user_id and pregnancy_status = 'active",
+    "source_symbol": "onboardPregnancy",
+    "source_file": "backend\\controllers\\pregnancyController.js",
+    "relevant": []
+  },
+  {
+    "question": "where is user data retrieved from",
+    "reference_answer": "the user data is retrieved from the user table using a SQL query with a WHERE condition on the user_id field",
+    "source_symbol": "getDashboard",
+    "source_file": "backend\\controllers\\dashboardController.js",
+    "relevant": []
+  },
+  {
+    "question": "how are SVG icons used in the UI",
+    "reference_answer": "SVG icons are used with a stroke color determined by the color prop",
+    "source_symbol": "Pill",
+    "source_file": "frontend\\src\\components\\SidebarLayout.jsx",
+    "relevant": []
+  },
+  {
+    "question": "how to reset sql mode to fix auto increment",
+    "reference_answer": "SQL_MODE is reset to an empty string to prevent NO_AUTO_VALUE_ON_ZERO from interfering with auto increment.",
+    "source_symbol": "main",
+    "source_file": "backend\\scripts\\fix_auto_increment.js",
+    "relevant": []
+  },
+  {
+    "question": "Where is the file upload directory specified",
+    "reference_answer": "The file upload directory is specified as the public/uploads directory",
+    "source_symbol": "destination",
+    "source_file": "backend\\routes\\documentRoutes.js",
+    "relevant": []
+  },
+  {
+    "question": "how is a reminder deleted from the database",
+    "reference_answer": "a reminder is deleted from the reminders table using a SQL DELETE query with a WHERE condition on both reminder_id and user_id",
+    "source_symbol": "deleteReminder",
+    "source_file": "backend\\controllers\\reminderController.js",
+    "relevant": []
+  },
+  {
+    "question": "where is user data inserted into the database",
+    "reference_answer": "user data is inserted into the pregnancy_profile table",
+    "source_symbol": "createPregnancy",
+    "source_file": "backend\\controllers\\pregnancyController.js",
+    "relevant": []
+  },
+  {
+    "question": "how to style a notification message in jsx",
+    "reference_answer": "the notification message is styled using inline styles based on a type condition",
+    "source_symbol": "Alert",
+    "source_file": "frontend\\src\\pages\\Tests.jsx",
+    "relevant": []
+  },
+  {
+    "question": "how are medication records filtered by user",
+    "reference_answer": "medication records are filtered by user using the user_id field in the pregnancy_profile table",
+    "source_symbol": "getMedications",
+    "source_file": "backend\\controllers\\medicationController.js",
+    "relevant": []
+  },
+  {
+    "question": "how to render a list of divs with a specific style",
+    "reference_answer": "the list of divs is rendered using the map function with an array of numbers [1, 2, 3] as keys.",
+    "source_symbol": "Skeletons",
+    "source_file": "frontend\\src\\pages\\Vaccination.jsx",
+    "relevant": []
+  },
+  {
+    "question": "How to display a no documents message in a search results page",
+    "reference_answer": "A no documents message is displayed when the filtered search results are empty, suggesting a different search term.",
+    "source_symbol": "EmptyState",
+    "source_file": "frontend\\src\\pages\\Documents.jsx",
+    "relevant": []
+  },
+  {
+    "question": "How to retrieve a doctor's availability by ID",
+    "reference_answer": "The doctor's availability is retrieved from the doctor table using a SELECT query with a WHERE condition on the doctor_id field.",
+    "source_symbol": "getDoctorAvailability",
+    "source_file": "backend\\controllers\\doctorController.js",
+    "relevant": []
+  },
+  {
+    "question": "how to retrieve all doctors with their hospital information",
+    "reference_answer": "the code retrieves all doctors with their hospital information from the doctor and hospital tables using a JOIN",
+    "source_symbol": "getDoctors",
+    "source_file": "backend\\controllers\\doctorController.js",
+    "relevant": []
+  },
+  {
+    "question": "how are medications retrieved from the database",
+    "reference_answer": "medications are retrieved from the medication table in the database",
+    "source_symbol": "getMedicationCatalogue",
+    "source_file": "backend\\controllers\\medicationController.js",
+    "relevant": []
+  },
+  {
+    "question": "where is a cron job scheduled",
+    "reference_answer": "a cron job is scheduled using cron.schedule with a schedule of every 1 minute",
+    "source_symbol": "startTask",
+    "source_file": "backend\\cron\\reminderCron.js",
+    "relevant": []
+  },
+  {
+    "question": "How are file types validated in the backend?",
+    "reference_answer": "File types are validated using a regular expression against a list of allowed extensions.",
+    "source_symbol": "fileFilter",
+    "source_file": "backend\\routes\\documentRoutes.js",
+    "relevant": []
+  },
+  {
+    "question": "how to format a date in a specific timezone",
+    "reference_answer": "the code uses the toLocaleTimeString method with the en-IN locale to format a date.",
+    "source_symbol": "fmtTime",
+    "source_file": "frontend\\src\\pages\\Symptoms.jsx",
+    "relevant": []
+  },
+  {
+    "question": "how are vaccination status colors determined",
+    "reference_answer": "the vaccination status colors are determined by a mapping of status to a background color and text color from a set of predefined styles",
+    "source_symbol": "StatusBadge",
+    "source_file": "frontend\\src\\pages\\Vaccination.jsx",
+    "relevant": []
+  },
+  {
+    "question": "where is user id extracted from the request",
+    "reference_answer": "the user id is extracted from the req.user.user_id property",
+    "source_symbol": "addBaby",
+    "source_file": "backend\\controllers\\vaccinationController.js",
+    "relevant": []
+  },
+  {
+    "question": "how to create a loading animation with CSS keyframes",
+    "reference_answer": "the pulse animation is defined using CSS keyframes with a 1.5s ease-in-out infinite animation duration.",
+    "source_symbol": "Skeleton",
+    "source_file": "frontend\\src\\pages\\Documents.jsx",
+    "relevant": []
+  }
+]
