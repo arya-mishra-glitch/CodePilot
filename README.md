@@ -30,7 +30,7 @@ Question:
 
 ## > How does the reminder system know when to send an SMS?
 
-![LLM answer](image.png) 
+![Reminder scheduling workflow answer](image.png) 
 
 ---
 
@@ -38,7 +38,7 @@ Question:
 
 ## > Trace the complete flow from a Twilio SMS being sent back to the triggering cron job.
 
- ![alt text](image-1.png) 
+ ![Twilio SMS workflow answer](image-1.png) 
 
 ---
 
@@ -46,7 +46,7 @@ Question:
 
 ## > How are dashboard statistics gathered and rendered?
 
- ![alt text](image-2.png) 
+ ![Databoard statistics answer](image-2.png) 
 
 ## Architecture
 
@@ -206,20 +206,6 @@ Example: query contains `phase` → matches `getPregnancyStatus` → appends `ge
 Example: `getPregnancyStatus` calls `pregnancyRows` → appends `pregnancy rows`
 
 The enriched query is then passed to a second retrieval call. Both expansion levels derive their vocabulary entirely from Layer 1's symbol list and Layer 2's call graph — there are no hardcoded domain terms, so the expansion generalizes to any codebase.
-
----
-
-## Layer 6 — Evaluation (`eval.py`)
-
-**Responsibility:** Measure retrieval quality against a naive chunking baseline and visualize the gap.
-
-The evaluation framework constructs a test set of (question, expected_symbol) pairs against a known codebase, then measures two metrics:
-
-**Recall@K** — fraction of test queries where the correct symbol appears in the top-K retrieved results, for K ∈ {1, 3, 5}.
-
-**MRR (Mean Reciprocal Rank)** — mean of 1/rank across all queries, where rank is the position of the first correct result. Penalizes systems that find the right answer but bury it.
-
-Both metrics are computed for the full pipeline (FAISS + BM25 + RRF + call-graph expansion) and for a naive baseline (plain text chunking with no structural awareness). Results are plotted with `matplotlib`.
 
 ---
 
