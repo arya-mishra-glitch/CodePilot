@@ -1,7 +1,16 @@
 # Code Intelligence System
+
 ### A Retrieval-Augmented Generation Engine for Structural Codebase Understanding
 
 ---
+
+Modern codebases often contain hundreds of files and thousands of functions, making onboarding and navigation difficult. This project treats a repository as a searchable knowledge base, allowing developers to ask natural-language questions such as:
+
+- "How are JWTs verified?"
+- "Trace the reminder scheduling workflow."
+- "Where is file upload validation performed?"
+
+instead of manually searching through source files.
 
 ## Overview
 
@@ -10,6 +19,32 @@ The Code Intelligence System is a multi-layer pipeline that transforms a raw cod
 The core insight driving the design: code has structure that flat text search destroys. Functions call other functions. Classes contain methods. A question about authentication is really a question about a cluster of interdependent symbols. The system is built to exploit that structure at every layer.
 
 ---
+
+# Demo
+
+### Natural-language code search
+
+Question:
+
+> How does the reminder system know when to send an SMS?
+
+[![LLM answer](image.png) ]
+
+---
+
+Question:
+
+> Trace the complete flow from a Twilio SMS being sent back to the triggering cron job.
+
+[ ![alt text](image-1.png) ]
+
+---
+
+Question:
+
+> How are dashboard statistics gathered and rendered?
+
+[ ![alt text](image-2.png) ]
 
 ## Architecture
 
@@ -223,16 +258,16 @@ User: "Which database tables determine a user's phase?"
 
 ## Tech Stack
 
-| Concern | Library |
-|---|---|
-| AST parsing | `tree-sitter` + language grammars |
-| Dense retrieval | `faiss-cpu`, `sentence-transformers` (`all-MiniLM-L6-v2`) |
-| Sparse retrieval | `rank_bm25` (BM25Okapi) |
-| Fusion | Reciprocal Rank Fusion (RRF, k=60) |
-| LLM — primary | Google Gemini 2.5 Flash |
-| LLM — fallback | Groq `llama-3.1-8b-instant` |
-| Evaluation | `matplotlib`, custom Recall@K / MRR |
-| Config | `python-dotenv` |
+| Concern          | Library                                                   |
+| ---------------- | --------------------------------------------------------- |
+| AST parsing      | `tree-sitter` + language grammars                         |
+| Dense retrieval  | `faiss-cpu`, `sentence-transformers` (`all-MiniLM-L6-v2`) |
+| Sparse retrieval | `rank_bm25` (BM25Okapi)                                   |
+| Fusion           | Reciprocal Rank Fusion (RRF, k=60)                        |
+| LLM — primary    | Google Gemini 2.5 Flash                                   |
+| LLM — fallback   | Groq `llama-3.1-8b-instant`                               |
+| Evaluation       | `matplotlib`, custom Recall@K / MRR                       |
+| Config           | `python-dotenv`                                           |
 
 ---
 
