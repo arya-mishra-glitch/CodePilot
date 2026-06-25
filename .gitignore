@@ -34,4 +34,5 @@ index_info.json
 faiss_style.index
 90MB models
 eval_results.png
+generated.json
 .cache
