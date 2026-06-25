@@ -24,27 +24,29 @@ The core insight driving the design: code has structure that flat text search de
 
 ### Natural-language code search
 
+The examples below were generated over real-world repositories without manually specifying files or function names.
+
 Question:
 
-> How does the reminder system know when to send an SMS?
+## > How does the reminder system know when to send an SMS?
 
-[![LLM answer](image.png) ]
+![LLM answer](image.png) 
 
 ---
 
 Question:
 
-> Trace the complete flow from a Twilio SMS being sent back to the triggering cron job.
+## > Trace the complete flow from a Twilio SMS being sent back to the triggering cron job.
 
-[ ![alt text](image-1.png) ]
+ ![alt text](image-1.png) 
 
 ---
 
 Question:
 
-> How are dashboard statistics gathered and rendered?
+## > How are dashboard statistics gathered and rendered?
 
-[ ![alt text](image-2.png) ]
+ ![alt text](image-2.png) 
 
 ## Architecture
 
