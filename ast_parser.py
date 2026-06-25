@@ -19,6 +19,7 @@ Usage:
 
 import sys
 import os
+import re
 import json
 import argparse
 from dataclasses import dataclass, field, asdict
@@ -69,6 +70,7 @@ class CodeUnit:
     code: str                   # the actual sourcce code text corresponding to that extracted unit
     language: str
     docstring: Optional[str] = None              # extracted docstring / JSDoc comment (if any)
+    tables_used: list = field(default_factory=list)  # SQL tables referenced in this symbol's source
     children: list = field(default_factory=list)    #When creating a new object, call list() to generate the default value.
 
     def display_name(self) -> str:
@@ -233,6 +235,37 @@ def _js_docstring(node: Node, source: bytes) -> Optional[str]:
 
 
 
+
+
+#-------------------------------------------------------------------------------------------------------------------------------
+# SQL Table Extraction
+#-------------------------------------------------------------------------------------------------------------------------------
+
+_SQL_PATTERNS = [
+    r'\bFROM\s+`?(\w+)`?',
+    r'\bJOIN\s+`?(\w+)`?',
+    r'\bINSERT\s+INTO\s+`?(\w+)`?',
+    r'\bUPDATE\s+`?(\w+)`?',
+    r'\bDELETE\s+FROM\s+`?(\w+)`?',
+]
+_SQL_NOISE = {"select", "where", "set", "values", "into", "from", "join",
+              "inner", "outer", "left", "right", "on", "and", "or", "not",
+              "null", "true", "false", "as", "by", "group", "order", "limit",
+              "having", "distinct", "count", "sum", "avg", "max", "min"}
+
+def _extract_sql_tables(code: str) -> list[str]:
+    """Extract SQL table names from raw source code using regex.
+    
+    Matches FROM, JOIN, INSERT INTO, UPDATE, DELETE FROM clauses.
+    Filters out SQL keywords and deduplicates.
+    """
+    tables = set()
+    for pattern in _SQL_PATTERNS:
+        for match in re.finditer(pattern, code, re.IGNORECASE):
+            name = match.group(1).lower()
+            if name not in _SQL_NOISE and len(name) > 1:
+                tables.add(name)
+    return sorted(tables)
 
 
 #Python
@@ -692,7 +725,8 @@ def parse_file(file_path: str) -> list[CodeUnit]:
 
 _SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
-    "dist", "build", ".next", "target", "out", ".idea", ".vscode",
+    "dist", "build", ".next", "target", "out", ".idea", ".vscode", 
+    "test", "examples"
 }
 
 
@@ -729,6 +763,12 @@ def units_to_records(units: list[CodeUnit]) -> list[dict]:
         # Only include docstring key when there's actually a value (keeps JSON tidy)
         if d.get("docstring") is None:
             d.pop("docstring")
+        # Populate SQL tables from source code
+        tables = _extract_sql_tables(u.code or "")
+        if tables:
+            d["tables_used"] = tables
+        else:
+            d.pop("tables_used", None)
         rows.append(d)
     return rows
 

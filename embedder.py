@@ -49,6 +49,7 @@ import pickle
 import sys
 from pathlib import Path
 from typing import Optional
+from typing import cast
 
 import faiss
 import numpy as np
@@ -130,6 +131,10 @@ def _build_text(sym: dict, callers: list[str] | None = None, callees: list[str] 
         parts.append(f"Called by: {', '.join(callers[:5])}")
     if callees:
         parts.append(f"Calls: {', '.join(callees[:5])}")
+
+    tables = sym.get("tables_used", [])
+    if tables:
+        parts.append(f"SQL tables: {', '.join(tables)}")
 
     code = sym.get("code", "")
     if code:
@@ -223,7 +228,7 @@ def build_index(
     # ── Load model ───────────────────────────────────────────────────────────
     print(f"    Loading model '{model_name}' ...", file=sys.stderr)
     model = SentenceTransformer(model_name)
-    dim = model.get_sentence_embedding_dimension()
+    dim = model.get_embedding_dimension()
     print(f"    Embedding dimension: {dim}", file=sys.stderr)
 
     # ── Embed code symbols (with call-graph context) ─────────────────────────
@@ -247,7 +252,7 @@ def build_index(
     # is equivalent to cosine similarity.  For >100k symbols, swap to
     # IndexIVFFlat for ~10× speed at tiny accuracy cost.
     faiss_code = faiss.IndexFlatIP(dim)
-    faiss_code.add(code_vecs.astype(np.float32))
+    faiss_code.add(code_vecs.astype(np.float32)) # type: ignore
     print(f"    FAISS code index: {faiss_code.ntotal} vectors", file=sys.stderr)
 
     # ── Build BM25 index (code) ──────────────────────────────────────────────
@@ -268,7 +273,7 @@ def build_index(
             normalize_embeddings=True,
         )
         faiss_style = faiss.IndexFlatIP(dim)
-        faiss_style.add(style_vecs.astype(np.float32))
+        faiss_style.add(style_vecs.astype(np.float32)) # type: ignore
         print(f"    FAISS style index: {faiss_style.ntotal} vectors", file=sys.stderr)
     else:
         print("    No style symbols — skipping style index.", file=sys.stderr)
@@ -392,14 +397,15 @@ def query(
     q_vec = model.encode([question], normalize_embeddings=True,
                          convert_to_numpy=True).astype(np.float32)
     faiss_k = min(_FAISS_TOP_K, faiss_code.ntotal)
-    _, faiss_ids = faiss_code.search(q_vec, faiss_k)   # shape (1, k)
+    _, faiss_ids = faiss_code.search(q_vec, faiss_k)  # type: ignore # shape (1, k) 
     faiss_ranking: list[int] = faiss_ids[0].tolist()   # list of symbol row indices
 
     # ── BM25 retrieval ────────────────────────────────────────────────────────
     tokens = _tokenize_query(question)
     bm25_scores: np.ndarray = bm25_code.get_scores(tokens)
     bm25_k = min(_BM25_TOP_K, len(code_syms))
-    bm25_ranking: list[int] = np.argsort(bm25_scores)[::-1][:bm25_k].tolist()
+    bm25_ranking: list[int] = cast(list[int], np.argsort(bm25_scores)[::-1][:bm25_k].tolist(),
+)
 
     # ── Reciprocal Rank Fusion ────────────────────────────────────────────────
     RRF_K = 60
@@ -420,7 +426,7 @@ def query(
     # ── Append style results if available ────────────────────────────────────
     if faiss_style is not None and style_syms:
         style_k = min(3, faiss_style.ntotal)
-        _, s_ids = faiss_style.search(q_vec, style_k)
+        _, s_ids = faiss_style.search(q_vec, style_k) # type: ignore
         for idx in s_ids[0].tolist():
             sym = dict(style_syms[idx])
             sym["_score"] = None   # style scores not fused — kept separate
