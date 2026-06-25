@@ -178,6 +178,7 @@ _CHUNK_OVERLAP = 5    # overlap between consecutive chunks
 _SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     "dist", "build", ".next", "target", "out",
+    "test", "tests", "examples"
 }
 _CODE_EXTENSIONS = {
     ".py", ".js", ".ts", ".jsx", ".tsx",
@@ -265,7 +266,7 @@ def build_naive_index(
 
     dim = vecs.shape[1]
     index = faiss.IndexFlatIP(dim)
-    index.add(vecs)
+    index.add(vecs) #type:ignore
     print(f"  [naive] FAISS index built: {index.ntotal} vectors", file=sys.stderr)
 
     return index, chunks, model
@@ -282,7 +283,7 @@ def query_naive(
     q_vec = model.encode([question], normalize_embeddings=True,
                          convert_to_numpy=True).astype(np.float32)
     k     = min(top_k, index.ntotal)
-    _, ids = index.search(q_vec, k)
+    _, ids = index.search(q_vec, k) #type:ignore
     return [chunks[i] for i in ids[0].tolist() if i < len(chunks)]
 
 

@@ -342,11 +342,15 @@ def _build_prompt(question: str, context_syms: list[dict]) -> str:
         You are a senior software engineer helping a developer understand a codebase.
         You have been given the most relevant code snippets retrieved from the codebase.
         Answer the question using ONLY the provided code. Do not hallucinate functions
-        or behaviour that are not present in the snippets below.
+        or behaviour that are not present in the snippets below. Do not infer or describe
+        relationships between code elements unless they are explicitly visible in the retrieved code.
 
         If the answer cannot be determined from the provided code, say so clearly.
         Keep your answer concise: lead with the direct answer, then explain with
         references to specific function names and file paths.
+
+        Never combine information from unrelated retrieved symbols. If two retrieved functions
+        disagree, say the evidence is inconclusive.
 
         ── RETRIEVED CODE ──────────────────────────────────────────────────────
         {code_context}
@@ -383,6 +387,10 @@ def _call_gemini(prompt: str) -> str:
         model="gemini-2.5-flash",
         contents=prompt,
     )
+
+    if response.text is None:
+        raise RuntimeError("Gemini returned no text.")
+
     return response.text
 
 
@@ -414,7 +422,13 @@ def _call_groq(prompt: str) -> str:
         max_tokens=_MAX_OUTPUT_TOKENS,
         temperature=_TEMPERATURE,
     )
-    return response.choices[0].message.content.strip()
+    
+    content = response.choices[0].message.content
+
+    if content is None:
+        raise RuntimeError("Groq returned no content.")
+
+    return content.strip()
 
 
 def _call_gemini_with_groq_fallback(prompt: str) -> str:
